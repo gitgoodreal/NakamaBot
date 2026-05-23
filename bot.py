@@ -1701,4 +1701,458 @@ async def removefromticket(interaction: discord.Interaction, user: discord.Membe
     await interaction.channel.set_permissions(user, overwrite=None)
     await interaction.response.send_message(f"✅ Removed {user.mention} from this ticket.")
 
+
+# ── Role & Server Management ─────────────────────────────────────────────────
+
+@bot.tree.command(name="addmod", description="Add a moderator role (mod only)")
+@app_commands.describe(role="The role to add as moderator")
+async def addmod(interaction: discord.Interaction, role: discord.Role):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    if role.name not in ROLE_HIERARCHY:
+        ROLE_HIERARCHY.append(role.name)
+    await interaction.response.send_message(f"✅ **{role.name}** added as a moderator role.", ephemeral=True)
+
+@bot.tree.command(name="delmod", description="Remove a moderator role (mod only)")
+@app_commands.describe(role="The role to remove from moderators")
+async def delmod(interaction: discord.Interaction, role: discord.Role):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    if role.name in ROLE_HIERARCHY:
+        ROLE_HIERARCHY.remove(role.name)
+    await interaction.response.send_message(f"✅ **{role.name}** removed from moderator roles.", ephemeral=True)
+
+@bot.tree.command(name="listmods", description="List all moderator roles")
+async def listmods(interaction: discord.Interaction):
+    roles = ", ".join(ROLE_HIERARCHY) if ROLE_HIERARCHY else "None"
+    await interaction.response.send_message(f"🛡️ **Moderator Roles:** {roles}", ephemeral=True)
+
+@bot.tree.command(name="createrole", description="Create a new role (mod only)")
+@app_commands.describe(name="Role name", color="Hex color e.g. #ff0000", hoist="Show separately in member list")
+async def createrole(interaction: discord.Interaction, name: str, color: str = None, hoist: bool = False):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    role_color = discord.Color.default()
+    if color:
+        try:
+            role_color = discord.Color(int(color.strip("#"), 16))
+        except ValueError:
+            await interaction.response.send_message("❌ Invalid color. Use hex like `#ff0000`.", ephemeral=True)
+            return
+    role = await interaction.guild.create_role(name=name, color=role_color, hoist=hoist)
+    await interaction.response.send_message(f"✅ Role **{role.name}** created.", ephemeral=True)
+
+@bot.tree.command(name="deleterole", description="Delete a role (mod only)")
+@app_commands.describe(role="The role to delete")
+async def deleterole(interaction: discord.Interaction, role: discord.Role):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    await role.delete()
+    await interaction.response.send_message(f"✅ Role **{role.name}** deleted.", ephemeral=True)
+
+@bot.tree.command(name="rolecolor", description="Change a role's color (mod only)")
+@app_commands.describe(role="The role to update", color="Hex color e.g. #ff0000")
+async def rolecolor(interaction: discord.Interaction, role: discord.Role, color: str):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    try:
+        new_color = discord.Color(int(color.strip("#"), 16))
+    except ValueError:
+        await interaction.response.send_message("❌ Invalid color. Use hex like `#ff0000`.", ephemeral=True)
+        return
+    await role.edit(color=new_color)
+    await interaction.response.send_message(f"✅ **{role.name}** color updated.", ephemeral=True)
+
+@bot.tree.command(name="rolename", description="Rename a role (mod only)")
+@app_commands.describe(role="The role to rename", new_name="New name for the role")
+async def rolename(interaction: discord.Interaction, role: discord.Role, new_name: str):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    old_name = role.name
+    await role.edit(name=new_name)
+    await interaction.response.send_message(f"✅ **{old_name}** renamed to **{new_name}**.", ephemeral=True)
+
+@bot.tree.command(name="nick", description="Change the bot's nickname (mod only)")
+@app_commands.describe(new_nickname="New nickname for the bot")
+async def nick(interaction: discord.Interaction, new_nickname: str):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    await interaction.guild.me.edit(nick=new_nickname)
+    await interaction.response.send_message(f"✅ Bot nickname changed to **{new_nickname}**.", ephemeral=True)
+
+@bot.tree.command(name="setnick", description="Change a member's nickname (mod only)")
+@app_commands.describe(user="The member", new_nickname="New nickname")
+async def setnick(interaction: discord.Interaction, user: discord.Member, new_nickname: str):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    await user.edit(nick=new_nickname)
+    await interaction.response.send_message(f"✅ **{user}**'s nickname set to **{new_nickname}**.", ephemeral=True)
+
+@bot.tree.command(name="mentionable", description="Toggle a role's mentionability (mod only)")
+@app_commands.describe(role="The role", value="True to make mentionable, False to disable")
+async def mentionable(interaction: discord.Interaction, role: discord.Role, value: bool):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    await role.edit(mentionable=value)
+    status = "mentionable" if value else "not mentionable"
+    await interaction.response.send_message(f"✅ **{role.name}** is now {status}.", ephemeral=True)
+
+@bot.tree.command(name="role", description="Add or remove a role from a member (mod only)")
+@app_commands.describe(user="The member", action="add or remove", role="The role")
+@app_commands.choices(action=[
+    app_commands.Choice(name="add", value="add"),
+    app_commands.Choice(name="remove", value="remove"),
+    app_commands.Choice(name="toggle", value="toggle"),
+])
+async def role_cmd(interaction: discord.Interaction, user: discord.Member, action: str, role: discord.Role):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    if action == "add":
+        await user.add_roles(role)
+        await interaction.response.send_message(f"✅ Added **{role.name}** to {user.mention}.", ephemeral=True)
+    elif action == "remove":
+        await user.remove_roles(role)
+        await interaction.response.send_message(f"✅ Removed **{role.name}** from {user.mention}.", ephemeral=True)
+    elif action == "toggle":
+        if role in user.roles:
+            await user.remove_roles(role)
+            await interaction.response.send_message(f"✅ Removed **{role.name}** from {user.mention}.", ephemeral=True)
+        else:
+            await user.add_roles(role)
+            await interaction.response.send_message(f"✅ Added **{role.name}** to {user.mention}.", ephemeral=True)
+
+@bot.tree.command(name="roleall", description="Add or remove a role from all members (mod only)")
+@app_commands.describe(action="add or remove", role="The role", target="all, bots, or humans")
+@app_commands.choices(action=[
+    app_commands.Choice(name="add", value="add"),
+    app_commands.Choice(name="remove", value="remove"),
+], target=[
+    app_commands.Choice(name="all", value="all"),
+    app_commands.Choice(name="bots", value="bots"),
+    app_commands.Choice(name="humans", value="humans"),
+])
+async def roleall(interaction: discord.Interaction, action: str, role: discord.Role, target: str = "all"):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    members = interaction.guild.members
+    if target == "bots":
+        members = [m for m in members if m.bot]
+    elif target == "humans":
+        members = [m for m in members if not m.bot]
+    count = 0
+    for member in members:
+        try:
+            if action == "add":
+                await member.add_roles(role)
+            else:
+                await member.remove_roles(role)
+            count += 1
+        except Exception:
+            pass
+    await interaction.followup.send(f"✅ {action.capitalize()}ed **{role.name}** for {count} {target}.", ephemeral=True)
+
+# ── Ignore System ─────────────────────────────────────────────────────────────
+IGNORED_CHANNELS = set()
+IGNORED_USERS = set()
+IGNORED_ROLES = set()
+
+@bot.tree.command(name="ignorechannel", description="Toggle command usage in a channel (mod only)")
+@app_commands.describe(channel="Channel to toggle")
+async def ignorechannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    if channel.id in IGNORED_CHANNELS:
+        IGNORED_CHANNELS.remove(channel.id)
+        await interaction.response.send_message(f"✅ Commands re-enabled in {channel.mention}.", ephemeral=True)
+    else:
+        IGNORED_CHANNELS.add(channel.id)
+        await interaction.response.send_message(f"✅ Commands disabled in {channel.mention}.", ephemeral=True)
+
+@bot.tree.command(name="ignoreuser", description="Toggle command usage for a user (mod only)")
+@app_commands.describe(user="User to toggle")
+async def ignoreuser(interaction: discord.Interaction, user: discord.Member):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    if user.id in IGNORED_USERS:
+        IGNORED_USERS.remove(user.id)
+        await interaction.response.send_message(f"✅ Commands re-enabled for {user.mention}.", ephemeral=True)
+    else:
+        IGNORED_USERS.add(user.id)
+        await interaction.response.send_message(f"✅ Commands disabled for {user.mention}.", ephemeral=True)
+
+@bot.tree.command(name="ignorerole", description="Toggle command usage for a role (mod only)")
+@app_commands.describe(role="Role to toggle")
+async def ignorerole(interaction: discord.Interaction, role: discord.Role):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    if role.id in IGNORED_ROLES:
+        IGNORED_ROLES.remove(role.id)
+        await interaction.response.send_message(f"✅ Commands re-enabled for **{role.name}**.", ephemeral=True)
+    else:
+        IGNORED_ROLES.add(role.id)
+        await interaction.response.send_message(f"✅ Commands disabled for **{role.name}**.", ephemeral=True)
+
+# ── Custom Commands ───────────────────────────────────────────────────────────
+CUSTOM_COMMANDS = {}  # {name: {"response": str, "enabled": bool}}
+CUSTOM_COMMANDS_FILE = "custom_commands.json"
+
+def save_custom_commands():
+    with open(CUSTOM_COMMANDS_FILE, "w") as f:
+        json.dump(CUSTOM_COMMANDS, f, indent=2)
+
+def load_custom_commands():
+    global CUSTOM_COMMANDS
+    if os.path.exists(CUSTOM_COMMANDS_FILE):
+        with open(CUSTOM_COMMANDS_FILE) as f:
+            CUSTOM_COMMANDS = json.load(f)
+        print(f"✅ Loaded {len(CUSTOM_COMMANDS)} custom commands")
+
+load_custom_commands()
+
+@bot.tree.command(name="customcmd", description="Manage custom commands (mod only)")
+@app_commands.describe(action="create, delete, enable, disable, list, show", name="Command name", response="Response text (for create)")
+@app_commands.choices(action=[
+    app_commands.Choice(name="create", value="create"),
+    app_commands.Choice(name="delete", value="delete"),
+    app_commands.Choice(name="enable", value="enable"),
+    app_commands.Choice(name="disable", value="disable"),
+    app_commands.Choice(name="list", value="list"),
+    app_commands.Choice(name="show", value="show"),
+])
+async def customcmd(interaction: discord.Interaction, action: str, name: str = None, response: str = None):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    if action == "create":
+        if not name or not response:
+            await interaction.response.send_message("❌ Provide both name and response.", ephemeral=True)
+            return
+        CUSTOM_COMMANDS[name.lower()] = {"response": response, "enabled": True}
+        save_custom_commands()
+        await interaction.response.send_message(f"✅ Custom command `!{name}` created.", ephemeral=True)
+    elif action == "delete":
+        if name and name.lower() in CUSTOM_COMMANDS:
+            del CUSTOM_COMMANDS[name.lower()]
+            save_custom_commands()
+            await interaction.response.send_message(f"✅ Custom command `!{name}` deleted.", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Command not found.", ephemeral=True)
+    elif action == "enable":
+        if name and name.lower() in CUSTOM_COMMANDS:
+            CUSTOM_COMMANDS[name.lower()]["enabled"] = True
+            save_custom_commands()
+            await interaction.response.send_message(f"✅ `!{name}` enabled.", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Command not found.", ephemeral=True)
+    elif action == "disable":
+        if name and name.lower() in CUSTOM_COMMANDS:
+            CUSTOM_COMMANDS[name.lower()]["enabled"] = False
+            save_custom_commands()
+            await interaction.response.send_message(f"✅ `!{name}` disabled.", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Command not found.", ephemeral=True)
+    elif action == "list":
+        if not CUSTOM_COMMANDS:
+            await interaction.response.send_message("No custom commands yet.", ephemeral=True)
+            return
+        lines = [f"`!{n}` — {'✅' if v['enabled'] else '❌'}" for n, v in CUSTOM_COMMANDS.items()]
+        await interaction.response.send_message("**Custom Commands:**\n" + "\n".join(lines), ephemeral=True)
+    elif action == "show":
+        if name and name.lower() in CUSTOM_COMMANDS:
+            cmd = CUSTOM_COMMANDS[name.lower()]
+            await interaction.response.send_message(f"`!{name}` → {cmd['response']} ({'enabled' if cmd['enabled'] else 'disabled'})", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Command not found.", ephemeral=True)
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    content = message.content.strip()
+    if content.startswith("!"):
+        cmd_name = content[1:].split()[0].lower()
+        if cmd_name in CUSTOM_COMMANDS and CUSTOM_COMMANDS[cmd_name]["enabled"]:
+            await message.channel.send(CUSTOM_COMMANDS[cmd_name]["response"])
+
+# ── Announce ──────────────────────────────────────────────────────────────────
+@bot.tree.command(name="announce", description="Send an announcement (mod only)")
+@app_commands.describe(channel="Channel to send to", message="The announcement", ping="Who to ping: none, everyone, here, or a role name")
+async def announce(interaction: discord.Interaction, channel: discord.TextChannel, message: str, ping: str = "none"):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    prefix = ""
+    if ping == "everyone":
+        prefix = "@everyone\n"
+    elif ping == "here":
+        prefix = "@here\n"
+    elif ping not in ("none", ""):
+        role = discord.utils.get(interaction.guild.roles, name=ping)
+        if role:
+            prefix = f"{role.mention}\n"
+    await channel.send(f"{prefix}{message}")
+    await interaction.response.send_message(f"✅ Announcement sent to {channel.mention}.", ephemeral=True)
+
+# ── Giveaway System ───────────────────────────────────────────────────────────
+import re
+
+GIVEAWAYS = {}  # {message_id: {channel_id, winners, end_time, name, entries}}
+GIVEAWAYS_FILE = "giveaways.json"
+
+def save_giveaways():
+    with open(GIVEAWAYS_FILE, "w") as f:
+        json.dump({str(k): v for k, v in GIVEAWAYS.items()}, f, indent=2)
+
+def load_giveaways():
+    global GIVEAWAYS
+    if os.path.exists(GIVEAWAYS_FILE):
+        with open(GIVEAWAYS_FILE) as f:
+            data = json.load(f)
+        GIVEAWAYS = {int(k): v for k, v in data.items()}
+        print(f"✅ Loaded {len(GIVEAWAYS)} giveaways")
+
+load_giveaways()
+
+def parse_duration(duration: str) -> int:
+    """Convert duration string like 1h, 30m, 2d to seconds."""
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    match = re.fullmatch(r"(\d+)([smhd])", duration.strip().lower())
+    if not match:
+        raise ValueError("Invalid duration")
+    return int(match.group(1)) * units[match.group(2)]
+
+@bot.tree.command(name="giveaway", description="Create and manage giveaways (mod only)")
+@app_commands.describe(
+    action="create, end, or reroll",
+    channel="Channel for the giveaway (create only)",
+    winners="Number of winners (create only)",
+    duration="Duration e.g. 1h, 30m, 2d (create only)",
+    name="Giveaway prize name (create only)",
+    message_id="Message ID to end or reroll"
+)
+@app_commands.choices(action=[
+    app_commands.Choice(name="create", value="create"),
+    app_commands.Choice(name="end", value="end"),
+    app_commands.Choice(name="reroll", value="reroll"),
+])
+async def giveaway(interaction: discord.Interaction, action: str,
+                   channel: discord.TextChannel = None, winners: int = 1,
+                   duration: str = None, name: str = None, message_id: str = None):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+
+    if action == "create":
+        if not channel or not duration or not name:
+            await interaction.response.send_message("❌ Provide channel, duration, and name.", ephemeral=True)
+            return
+        try:
+            seconds = parse_duration(duration)
+        except ValueError:
+            await interaction.response.send_message("❌ Invalid duration. Use format like `1h`, `30m`, `2d`.", ephemeral=True)
+            return
+
+        end_time = datetime.now(timezone.utc).timestamp() + seconds
+        embed = discord.Embed(
+            title=f"🎉 GIVEAWAY — {name}",
+            description=f"React with 🎉 to enter!\n\n**Winners:** {winners}\n**Ends:** <t:{int(end_time)}:R>",
+            color=discord.Color.gold()
+        )
+        embed.set_footer(text="NakamaShip™ Giveaway")
+        msg = await channel.send(embed=embed)
+        await msg.add_reaction("🎉")
+
+        GIVEAWAYS[msg.id] = {
+            "channel_id": channel.id,
+            "winners": winners,
+            "end_time": end_time,
+            "name": name,
+            "entries": []
+        }
+        save_giveaways()
+
+        await interaction.response.send_message(f"✅ Giveaway started in {channel.mention}!", ephemeral=True)
+
+        async def end_giveaway_later():
+            await asyncio.sleep(seconds)
+            await conclude_giveaway(msg.id)
+
+        asyncio.create_task(end_giveaway_later())
+
+    elif action in ("end", "reroll"):
+        if not message_id:
+            await interaction.response.send_message("❌ Provide a message ID.", ephemeral=True)
+            return
+        mid = int(message_id)
+        await interaction.response.defer(ephemeral=True)
+        await conclude_giveaway(mid, reroll=(action == "reroll"))
+        await interaction.followup.send("✅ Done!", ephemeral=True)
+
+async def conclude_giveaway(message_id: int, reroll: bool = False):
+    import random
+    data = GIVEAWAYS.get(message_id)
+    if not data:
+        return
+    channel = bot.get_channel(data["channel_id"])
+    if not channel:
+        return
+    try:
+        msg = await channel.fetch_message(message_id)
+    except Exception:
+        return
+
+    # Collect entries from reactions
+    entries = []
+    for reaction in msg.reactions:
+        if str(reaction.emoji) == "🎉":
+            async for user in reaction.users():
+                if not user.bot:
+                    entries.append(user)
+
+    num_winners = data["winners"]
+    if not entries:
+        await channel.send("🎉 Giveaway ended — no valid entries!")
+        return
+
+    picked = random.sample(entries, min(num_winners, len(entries)))
+    mentions = ", ".join(w.mention for w in picked)
+    prefix = "🔄 Rerolled!" if reroll else "🎉 Giveaway ended!"
+    await channel.send(f"{prefix} **{data['name']}** winners: {mentions} — congratulations!")
+
+# ── Add Emote ─────────────────────────────────────────────────────────────────
+@bot.tree.command(name="addemote", description="Add an emote to the server (mod only)")
+@app_commands.describe(name="Emote name", url="Image URL for the emote")
+async def addemote(interaction: discord.Interaction, name: str, url: str):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                await interaction.followup.send("❌ Could not fetch image.", ephemeral=True)
+                return
+            image_data = await resp.read()
+    try:
+        emoji = await interaction.guild.create_custom_emoji(name=name, image=image_data)
+        await interaction.followup.send(f"✅ Emote {emoji} added!", ephemeral=True)
+    except discord.HTTPException as e:
+        await interaction.followup.send(f"❌ Failed: {e}", ephemeral=True)
+
 bot.run(TOKEN)
