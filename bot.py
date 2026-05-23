@@ -1517,7 +1517,14 @@ class TicketOpenView(discord.ui.View):
             color=discord.Color.blurple()
         )
         embed.set_footer(text=f"Ticket #{ticket_num:04d}")
-        await ticket_channel.send(content=member.mention, embed=embed, view=TicketActionView())
+        # Ping the configured role if set
+        ping_role_id = config.get("ping_role_id")
+        ping_content = member.mention
+        if ping_role_id:
+            ping_role = guild.get_role(ping_role_id)
+            if ping_role:
+                ping_content = f"{member.mention} | {ping_role.mention}"
+        await ticket_channel.send(content=ping_content, embed=embed, view=TicketActionView())
 
         # Log it
         log_channel_id = config.get("log_channel_id")
@@ -1629,11 +1636,13 @@ async def handle_ticket_close(interaction: discord.Interaction):
 @app_commands.describe(
     channel="Channel where the Open Ticket button will be posted",
     log_channel="Channel where ticket logs are sent",
+    ping_role="Role to ping when a new ticket is opened",
     category="Category to create ticket channels under (optional)"
 )
 async def setuptickets(interaction: discord.Interaction,
                        channel: discord.TextChannel,
                        log_channel: discord.TextChannel,
+                       ping_role: discord.Role = None,
                        category: discord.CategoryChannel = None):
     if not has_mod_role(interaction):
         await interaction.response.send_message("❌ You don't have permission to do this.", ephemeral=True)
@@ -1642,6 +1651,7 @@ async def setuptickets(interaction: discord.Interaction,
     TICKET_CONFIG[interaction.guild.id] = {
         "category_id": category.id if category else None,
         "log_channel_id": log_channel.id,
+        "ping_role_id": ping_role.id if ping_role else None,
     }
     save_ticket_config()
 
@@ -1653,7 +1663,21 @@ async def setuptickets(interaction: discord.Interaction,
     )
     await channel.send(embed=embed, view=TicketOpenView())
 
-    await interaction.response.send_message(f"✅ Ticket system set up! Button posted in {channel.mention}, logs going to {log_channel.mention}.", ephemeral=True)
+    ping_info = f" **{ping_role.name}** will be pinged on new tickets." if ping_role else ""
+    await interaction.response.send_message(f"✅ Ticket system set up! Button posted in {channel.mention}, logs going to {log_channel.mention}.{ping_info}", ephemeral=True)
+
+@bot.tree.command(name="setticketpingrole", description="Update the role pinged when a ticket is opened (mod only)")
+@app_commands.describe(role="The role to ping when a new ticket is opened")
+async def setticketpingrole(interaction: discord.Interaction, role: discord.Role):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ You don't have permission to do this.", ephemeral=True)
+        return
+    if interaction.guild.id not in TICKET_CONFIG:
+        await interaction.response.send_message("❌ Ticket system not set up yet. Use `/setuptickets` first.", ephemeral=True)
+        return
+    TICKET_CONFIG[interaction.guild.id]["ping_role_id"] = role.id
+    save_ticket_config()
+    await interaction.response.send_message(f"✅ **{role.name}** will now be pinged when a new ticket is opened.", ephemeral=True)
 
 @bot.tree.command(name="addtoticket", description="Add a member to the current ticket channel (ticket staff only)")
 @app_commands.describe(user="The member to add to this ticket")
