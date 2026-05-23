@@ -1,0 +1,37 @@
+{
+  "wish_channel": 1501909942754344965,
+  "setup_channel": 1507320812737134642,
+  "last_chain_msg": 1507371530089267200,
+  "birthdays": {
+    "1476320547389313206": {
+      "day": 15,
+      "month": 6,
+      "timezone": "Asia/Kolkata"
+    },
+    "1371838772127334492": {
+      "day": 3,
+      "month": 7,
+      "timezone": "Asia/Kolkata"
+    },
+    "746309862283149372": {
+      "day": 11,
+      "month": 5,
+      "timezone": "Pacific/Honolulu"
+    },
+    "1229072909407097013": {
+      "day": 17,
+      "month": 3,
+      "timezone": "Asia/Kolkata"
+    },
+    "1163935728980475986": {
+      "day": 30,
+      "month": 1,
+      "timezone": "America/Chicago"
+    },
+    "1134099082223292478": {
+      "day": 20,
+      "month": 4,
+      "timezone": "Asia/Manila"
+    }
+  }
+}

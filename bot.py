@@ -4,7 +4,8 @@ from discord import app_commands
 import os
 import asyncio
 import json
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone
+import pytz
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -34,6 +35,7 @@ WELCOME_ROLES = [
 CHANNELS_PER_ROW = 2
 
 LOG_CHANNEL_ID = 1501943719249707018
+_verifying_now = set()  # Tracks users mid-verification to prevent on_member_update double-firing
 ROLE_HIERARCHY = ["King of the Pirates", "Admin", "Manager", "Moderator"]
 BAD_WORDS = ["badword1", "badword2"]
 WARNINGS = {}
@@ -194,6 +196,7 @@ async def handle_verification_success(interaction: discord.Interaction):
         else:
             print(f"⚠️ [VERIFY] Unverified role not on {member} or not found, skipping removal")
 
+        _verifying_now.add(member.id)
         await member.add_roles(verified_role, reason="Passed verification")
         print(f"✅ [VERIFY] Added verified role to {member}")
 
@@ -214,6 +217,7 @@ async def handle_verification_success(interaction: discord.Interaction):
         f"🎉 You're now verified! Welcome to the server, {member.mention}!", ephemeral=True
     )
     print(f"✅ [VERIFY] {member} successfully verified in {guild.name}")
+    _verifying_now.discard(member.id)
     await log_action(guild, "Member Verified", bot.user, member)
 
 # ── Change 5: DM-based verification ───────────────────────────────────────────
@@ -267,6 +271,7 @@ class DMVerifyView(discord.ui.View):
             else:
                 print(f"⚠️ [VERIFY/DM] Unverified role not on {member} or not found, skipping removal")
 
+            _verifying_now.add(member.id)
             await member.add_roles(verified_role, reason="Verified via DM")
             print(f"✅ [VERIFY/DM] Added verified role to {member}")
 
@@ -285,6 +290,7 @@ class DMVerifyView(discord.ui.View):
 
         await interaction.response.send_message(f"🎉 You're now verified in **{guild.name}**! You have full access.", ephemeral=True)
         self.stop()
+        _verifying_now.discard(member.id)
         print(f"✅ [VERIFY/DM] {member} successfully verified in {guild.name}")
         await log_action(guild, "Member Verified (DM)", bot.user, member)
 
@@ -538,6 +544,8 @@ async def on_ready():
     load_sticky_config()
     bot.add_view(VerifyButtonView())
     bot.add_view(RulesVerifyView())
+    bot.add_view(AddBirthdayView())
+    bot.loop.create_task(birthday_checker())
     await bot.tree.sync()
     print(f"✅ {bot.user} is online! Synced slash commands globally.")
 
@@ -599,6 +607,10 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 
     # Verified role just appeared on this member
     if verified_role not in before.roles and verified_role in after.roles:
+        # Skip if the bot's own verify flow already handled this — avoids double welcome/DM
+        if after.id in _verifying_now:
+            _verifying_now.discard(after.id)
+            return
         print(f"✅ [ROLE UPDATE] {after} just got the verified role in {after.guild.name}")
 
         # Remove unverified role if still present (worker may have missed it)
@@ -610,16 +622,6 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                 print(f"❌ [ROLE UPDATE] Forbidden when removing unverified role from {after}")
             except discord.HTTPException as e:
                 print(f"❌ [ROLE UPDATE] HTTPException removing unverified role: {e.status} {e.text}")
-
-        # DM the user to confirm
-        try:
-            await after.send(
-                f"🎉 You're now verified in **{after.guild.name}**!\n\n"
-                f"Welcome to the crew — you now have full access to the server. ⚓"
-            )
-            print(f"✅ [ROLE UPDATE] Sent verification success DM to {after}")
-        except discord.Forbidden:
-            print(f"⚠️ [ROLE UPDATE] Could not DM {after} — DMs closed")
 
         await log_action(after.guild, "Member Verified (Website)", bot.user, after)
 
@@ -859,6 +861,35 @@ async def removerole(interaction: discord.Interaction, member: discord.Member, r
 # ── Sticky Messages ────────────────────────────────────────────────────────────
 
 STICKY_CONFIG = {}          # {channel_id: {"message": str, "last_id": int}}
+
+# ── Birthday system ──────────────────────────────────────────────────────────
+BIRTHDAY_CONFIG = {}        # {user_id: {"day": int, "month": int, "timezone": str}}
+BIRTHDAY_CONFIG_FILE = "birthday_config.json"
+BIRTHDAY_WISH_CHANNEL_ID = 1501909942754344965  # General chat — where wishes are sent
+BIRTHDAY_SETUP_CHANNEL_ID = None               # Birthday wishes channel — where setup chain lives
+BIRTHDAY_LAST_CHAIN_MSG_ID = None              # ID of the last chain message (to disable its button)
+
+def save_birthday_config():
+    with open(BIRTHDAY_CONFIG_FILE, "w") as f:
+        json.dump({
+            "wish_channel": BIRTHDAY_WISH_CHANNEL_ID,
+            "setup_channel": BIRTHDAY_SETUP_CHANNEL_ID,
+            "last_chain_msg": BIRTHDAY_LAST_CHAIN_MSG_ID,
+            "birthdays": {str(k): v for k, v in BIRTHDAY_CONFIG.items()}
+        }, f, indent=2)
+
+def load_birthday_config():
+    global BIRTHDAY_CONFIG, BIRTHDAY_WISH_CHANNEL_ID, BIRTHDAY_SETUP_CHANNEL_ID, BIRTHDAY_LAST_CHAIN_MSG_ID
+    if os.path.exists(BIRTHDAY_CONFIG_FILE):
+        with open(BIRTHDAY_CONFIG_FILE, "r") as f:
+            data = json.load(f)
+        BIRTHDAY_WISH_CHANNEL_ID = data.get("wish_channel", 1501909942754344965)
+        BIRTHDAY_SETUP_CHANNEL_ID = data.get("setup_channel")
+        BIRTHDAY_LAST_CHAIN_MSG_ID = data.get("last_chain_msg")
+        BIRTHDAY_CONFIG = {int(k): v for k, v in data.get("birthdays", {}).items()}
+        print(f"✅ Loaded birthday config for {len(BIRTHDAY_CONFIG)} user(s)")
+
+load_birthday_config()
 STICKY_CONFIG_FILE = "sticky_config.json"
 
 def save_sticky_config():
@@ -879,28 +910,36 @@ class StickyStyleView(discord.ui.View):
         super().__init__(timeout=60)
         self.style = None
 
-    @discord.ui.button(label="📌 Plain Text", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="📌 Plain Text", style=discord.ButtonStyle.secondary, custom_id="sticky:plain")
     async def plain_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.style = "plain"
-        self.stop()
         await interaction.response.defer()
+        self.stop()
 
-    @discord.ui.button(label="✨ Embed", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="✨ Embed", style=discord.ButtonStyle.primary, custom_id="sticky:embed")
     async def embed_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.style = "embed"
-        self.stop()
         await interaction.response.defer()
+        self.stop()
 
 async def post_sticky(channel: discord.TextChannel, message: str, style: str) -> discord.Message:
     if style == "embed":
+        if len(message) > 4096:
+            raise ValueError(f"Message is too long for an embed ({len(message)}/4096 characters). Please shorten it.")
         embed = discord.Embed(description=message, color=discord.Color.gold())
         embed.set_footer(text="📌 Sticky Message")
         return await channel.send(embed=embed)
     else:
-        return await channel.send(f"📌 {message}")
+        full_message = f"📌 {message}"
+        if len(full_message) > 2000:
+            raise ValueError(
+                f"Message is too long for plain text ({len(full_message)}/2000 characters). "
+                f"Please shorten it by {len(full_message) - 2000} character(s), or use the Embed style which supports up to 4096 characters."
+            )
+        return await channel.send(full_message)
 
 @bot.tree.command(name="setsticky", description="Set a sticky message in a channel")
-@app_commands.describe(channel="Channel to stick the message in", message="The message to stick")
+@app_commands.describe(channel="Channel to stick the message in", message="The message to stick (plain text: 1998 chars max, embed: 4096 chars max)")
 async def setsticky(interaction: discord.Interaction, channel: discord.TextChannel, message: str):
     if not has_mod_role(interaction):
         await interaction.response.send_message("❌ You don't have permission to do this.", ephemeral=True)
@@ -914,7 +953,11 @@ async def setsticky(interaction: discord.Interaction, channel: discord.TextChann
         await interaction.edit_original_response(content="⏰ Timed out.", view=None)
         return
 
-    sent = await post_sticky(channel, message, view.style)
+    try:
+        sent = await post_sticky(channel, message, view.style)
+    except ValueError as e:
+        await interaction.edit_original_response(content=f"❌ {e}", view=None)
+        return
     STICKY_CONFIG[channel.id] = {"message": message, "last_id": sent.id, "style": view.style}
     save_sticky_config()
 
@@ -957,5 +1000,439 @@ async def liststicky(interaction: discord.Interaction):
 
     lines = [f"<#{cid}>: {v['message'][:60]}{'...' if len(v['message']) > 60 else ''}" for cid, v in stickies.items()]
     await interaction.response.send_message("📌 **Sticky Messages:**\n" + "\n".join(lines), ephemeral=True)
+
+
+INTRO_TEMPLATE = """__**Stickied Message:**__
+**✦˚₊ ⊹ About Me!**
+┊ ⊹ Username (LNC Name):
+┊ ⊹ Pronouns:
+┊ ⊹ Age (Birthday):
+┊ ⊹ Country:
+┊ ⊹ Favourite Genre:
+┊ ⊹ Personality Type:
+─────────────────✧˖°>
+**✦˚₊ ⊹ My Favourites!**
+┊ ⊹ Novel:
+┊ ⊹ Anime:
+┊ ⊹ Manga/hwa:
+─────────────────✧˖°>
+**✦˚₊ ⊹ Community Interests!**
+┊ ⊹ Games I Play:
+┊ ⊹ Top 3 Novels:
+┊ ⊹ Hobbies:
+┊ ⊹ Favourite Tropes:
+─────────────────✧˖°>
+**✦˚₊ ⊹ Bonus Details!**
+┊ ⊹ Open to DMs About:
+┊ ⊹ An Unpopular Opinion:
+┊ ⊹ Fun Fact About Me:>
+--- **Please use the above template to fill in your details!** ---"""
+
+@bot.tree.command(name="setintrosticky", description="Post the introduction template as a sticky in a channel")
+@app_commands.describe(channel="Channel to post the intro sticky in")
+async def setintrosticky(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ You don't have permission to do this.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    # Delete old sticky if one exists
+    old = STICKY_CONFIG.get(channel.id)
+    if old:
+        try:
+            old_msg = await channel.fetch_message(old["last_id"])
+            await old_msg.delete()
+        except Exception:
+            pass
+
+    sent = await channel.send(INTRO_TEMPLATE)
+    STICKY_CONFIG[channel.id] = {"message": INTRO_TEMPLATE, "last_id": sent.id, "style": "plain"}
+    save_sticky_config()
+
+    await interaction.followup.send(f"📌 Intro sticky set in {channel.mention}.", ephemeral=True)
+
+
+# ── Common timezones list ────────────────────────────────────────────────────
+COMMON_TIMEZONES = [
+    "Pacific/Midway", "Pacific/Honolulu", "America/Anchorage", "America/Los_Angeles",
+    "America/Denver", "America/Chicago", "America/New_York", "America/Sao_Paulo",
+    "America/Argentina/Buenos_Aires", "America/Noronha", "Atlantic/Azores",
+    "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Helsinki",
+    "Europe/Istanbul", "Asia/Dubai", "Asia/Kolkata", "Asia/Dhaka",
+    "Asia/Bangkok", "Asia/Singapore", "Asia/Tokyo", "Asia/Seoul",
+    "Australia/Sydney", "Pacific/Auckland", "Pacific/Fiji",
+    "Asia/Jakarta", "Asia/Manila", "Asia/Taipei", "Asia/Hong_Kong",
+    "Asia/Karachi", "Asia/Riyadh", "Africa/Cairo", "Africa/Nairobi",
+    "America/Toronto", "America/Vancouver", "America/Mexico_City",
+    "Europe/Moscow", "Europe/Amsterdam", "Europe/Rome", "Europe/Madrid",
+    "Europe/Athens", "Asia/Tehran", "Asia/Kabul", "Asia/Tashkent",
+    "Asia/Colombo", "Asia/Kathmandu", "Asia/Almaty", "Asia/Yangon",
+]
+
+async def timezone_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    filtered = [tz for tz in COMMON_TIMEZONES if current.lower() in tz.lower()]
+    return [app_commands.Choice(name=tz, value=tz) for tz in filtered[:25]]
+
+class BirthdayModal(discord.ui.Modal, title="🎂 Set Your Birthday"):
+    birth_day = discord.ui.TextInput(
+        label="Day (1-31)",
+        placeholder="e.g. 15",
+        min_length=1,
+        max_length=2,
+        required=True,
+    )
+    birth_month = discord.ui.TextInput(
+        label="Month (1-12)",
+        placeholder="e.g. 7 for July",
+        min_length=1,
+        max_length=2,
+        required=True,
+    )
+
+    def __init__(self, timezone_str: str):
+        super().__init__()
+        self.timezone_str = timezone_str
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            day = int(self.birth_day.value.strip())
+            month = int(self.birth_month.value.strip())
+            if not (1 <= day <= 31) or not (1 <= month <= 12):
+                raise ValueError
+            # Quick sanity check
+            datetime(2000, month, day)
+        except (ValueError, TypeError):
+            await interaction.response.send_message("❌ Invalid date. Please enter a valid day (1-31) and month (1-12).", ephemeral=True)
+            return
+
+        BIRTHDAY_CONFIG[interaction.user.id] = {
+            "day": day,
+            "month": month,
+            "timezone": self.timezone_str,
+        }
+        save_birthday_config()
+
+        # Log to the server log channel
+        log_channel = interaction.client.get_channel(LOG_CHANNEL_ID)
+        if log_channel:
+            embed = discord.Embed(title="🎂 Birthday Registered", color=discord.Color.blurple())
+            embed.add_field(name="User", value=f"{interaction.user.mention} (`{interaction.user}`)", inline=False)
+            embed.add_field(name="Birthday", value=f"{day}/{month}", inline=True)
+            embed.add_field(name="Timezone", value=self.timezone_str, inline=True)
+            embed.set_thumbnail(url=interaction.user.display_avatar.url)
+            embed.timestamp = discord.utils.utcnow()
+            await log_channel.send(embed=embed)
+
+        msg = f"\U0001f382 Birthday saved! You'll be wished on **{day}/{month}** at 12:00 AM **{self.timezone_str}**.\n\nWant to add yours too? Click below!"
+        # Post the chain message in the setup channel if configured, else reply inline
+        if BIRTHDAY_SETUP_CHANNEL_ID:
+            setup_channel = interaction.client.get_channel(BIRTHDAY_SETUP_CHANNEL_ID)
+            if setup_channel:
+                global BIRTHDAY_LAST_CHAIN_MSG_ID
+                # Disable the button on the previous chain message
+                if BIRTHDAY_LAST_CHAIN_MSG_ID:
+                    try:
+                        old_msg = await setup_channel.fetch_message(BIRTHDAY_LAST_CHAIN_MSG_ID)
+                        await old_msg.delete()
+                    except Exception:
+                        pass
+                # Post fresh message with the button
+                new_chain_msg = await setup_channel.send(msg, view=AddBirthdayView())
+                BIRTHDAY_LAST_CHAIN_MSG_ID = new_chain_msg.id
+                save_birthday_config()
+                await interaction.response.send_message("✅ Your birthday has been saved!", ephemeral=True)
+                return
+        await interaction.response.send_message(msg, view=AddBirthdayView())
+
+# Grouped timezones for the dropdown
+TIMEZONE_GROUPS = {
+    "🌎 Americas": [
+        "America/Los_Angeles", "America/Denver", "America/Chicago", "America/New_York",
+        "America/Toronto", "America/Vancouver", "America/Mexico_City", "America/Sao_Paulo",
+        "America/Argentina/Buenos_Aires", "America/Anchorage", "Pacific/Honolulu",
+    ],
+    "🌍 Europe & Africa": [
+        "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Rome", "Europe/Madrid",
+        "Europe/Amsterdam", "Europe/Helsinki", "Europe/Athens", "Europe/Istanbul",
+        "Europe/Moscow", "Africa/Cairo", "Africa/Nairobi", "Atlantic/Azores",
+    ],
+    "🌏 Asia": [
+        "Asia/Dubai", "Asia/Kolkata", "Asia/Dhaka", "Asia/Bangkok", "Asia/Singapore",
+        "Asia/Tokyo", "Asia/Seoul", "Asia/Jakarta", "Asia/Manila", "Asia/Hong_Kong",
+        "Asia/Taipei", "Asia/Karachi", "Asia/Riyadh", "Asia/Tehran", "Asia/Tashkent",
+        "Asia/Colombo", "Asia/Kathmandu", "Asia/Almaty", "Asia/Yangon",
+    ],
+    "🏝️ Oceania": [
+        "Australia/Sydney", "Australia/Melbourne", "Australia/Brisbane", "Australia/Perth",
+        "Australia/Adelaide", "Australia/Darwin", "Australia/Hobart",
+        "Pacific/Auckland", "Pacific/Fiji", "Pacific/Guam", "Pacific/Port_Moresby",
+        "Pacific/Noumea", "Pacific/Tongatapu", "Pacific/Apia", "Pacific/Honolulu",
+    ],
+}
+
+class TimezoneSelect(discord.ui.Select):
+    def __init__(self, group_name: str, timezones: list):
+        options = [discord.SelectOption(label=tz, value=tz) for tz in timezones]
+        super().__init__(
+            placeholder=f"Pick your timezone — {group_name}",
+            options=options,
+            custom_id=f"tz_select:{group_name}",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(BirthdayModal(self.values[0]))
+
+class AddBirthdayView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🎂 Add My Birthday", style=discord.ButtonStyle.primary, custom_id="birthday:add")
+    async def add_birthday(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = TimezoneRegionView()
+        await interaction.response.send_message(
+            "🌍 **Step 1:** Pick your region to find your timezone:",
+            view=view,
+            ephemeral=True,
+        )
+
+class TimezoneRegionView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60)
+        for group_name, timezones in TIMEZONE_GROUPS.items():
+            self.add_item(TimezoneSelect(group_name, timezones))
+
+    async def on_timeout(self):
+        pass
+
+@bot.tree.command(name="setwishchannel", description="Set the channel where birthday wishes are announced (mod only)")
+@app_commands.describe(channel="The channel to send birthday announcements in")
+async def setwishchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ You don't have permission to do this.", ephemeral=True)
+        return
+    global BIRTHDAY_WISH_CHANNEL_ID
+    BIRTHDAY_WISH_CHANNEL_ID = channel.id
+    save_birthday_config()
+    await interaction.response.send_message(f"✅ Birthday wishes will be announced in {channel.mention}.", ephemeral=True)
+
+@bot.tree.command(name="setbirthdaysetupchannel", description="Set the channel where the birthday registration chain lives (mod only)")
+@app_commands.describe(channel="The channel where members register their birthdays")
+async def setbirthdaysetupchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ You don't have permission to do this.", ephemeral=True)
+        return
+    global BIRTHDAY_SETUP_CHANNEL_ID
+    BIRTHDAY_SETUP_CHANNEL_ID = channel.id
+    save_birthday_config()
+    # Post the initial chain message in the setup channel
+    view = AddBirthdayView()
+    await channel.send("🎂 **Add your birthday to get wished at midnight!**\nClick the button below to get started.", view=view)
+    await interaction.response.send_message(f"✅ Birthday setup channel set to {channel.mention}. The registration button has been posted there!", ephemeral=True)
+
+@bot.tree.command(name="birthday", description="Set your birthday to get wished at midnight!")
+@app_commands.describe(timezone="Search and select your timezone")
+@app_commands.autocomplete(timezone=timezone_autocomplete)
+async def birthday(interaction: discord.Interaction, timezone: str):
+    if timezone not in pytz.all_timezones:
+        await interaction.response.send_message(
+            f"❌ `{timezone}` is not a valid timezone. Please pick one from the suggestions.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.send_modal(BirthdayModal(timezone))
+
+@bot.tree.command(name="listbirthdays", description="List all saved birthdays in this server")
+async def listbirthdays(interaction: discord.Interaction):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ You don't have permission to do this.", ephemeral=True)
+        return
+    if not BIRTHDAY_CONFIG:
+        await interaction.response.send_message("No birthdays saved yet.", ephemeral=True)
+        return
+    lines = []
+    for uid, data in BIRTHDAY_CONFIG.items():
+        lines.append(f"<@{uid}>: {data['day']}/{data['month']} ({data['timezone']})")
+    await interaction.response.send_message("🎂 **Birthdays:**\n" + "\n".join(lines), ephemeral=True)
+
+@bot.tree.command(name="removebirthday", description="Remove your birthday from the list")
+async def removebirthday(interaction: discord.Interaction):
+    if interaction.user.id not in BIRTHDAY_CONFIG:
+        await interaction.response.send_message("❌ You don't have a birthday saved.", ephemeral=True)
+        return
+    del BIRTHDAY_CONFIG[interaction.user.id]
+    save_birthday_config()
+    await interaction.response.send_message("✅ Your birthday has been removed.", ephemeral=True)
+
+@bot.tree.command(name="clearallbirthdays", description="Remove every birthday from the list (mod only)")
+async def clearallbirthdays(interaction: discord.Interaction):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ You don't have permission to do this.", ephemeral=True)
+        return
+    count = len(BIRTHDAY_CONFIG)
+    BIRTHDAY_CONFIG.clear()
+    save_birthday_config()
+    await interaction.response.send_message(f"✅ Cleared all {count} birthday(s) from the list.", ephemeral=True)
+
+@bot.tree.command(name="removeuserbday", description="Remove a specific member's birthday (mod only)")
+@app_commands.describe(user="The member whose birthday you want to remove")
+async def removeuserbday(interaction: discord.Interaction, user: discord.Member):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ You don't have permission to do this.", ephemeral=True)
+        return
+    if user.id not in BIRTHDAY_CONFIG:
+        await interaction.response.send_message(f"❌ {user.mention} doesn't have a birthday saved.", ephemeral=True)
+        return
+    del BIRTHDAY_CONFIG[user.id]
+    save_birthday_config()
+    await interaction.response.send_message(f"✅ Removed birthday for {user.mention}.", ephemeral=True)
+
+class EditBirthdayModal(discord.ui.Modal, title="✏️ Edit Birthday"):
+    birth_day = discord.ui.TextInput(
+        label="New Day (1-31)",
+        placeholder="e.g. 15",
+        min_length=1,
+        max_length=2,
+        required=True,
+    )
+    birth_month = discord.ui.TextInput(
+        label="New Month (1-12)",
+        placeholder="e.g. 7 for July",
+        min_length=1,
+        max_length=2,
+        required=True,
+    )
+
+    def __init__(self, user: discord.Member, timezone_str: str):
+        super().__init__()
+        self.target_user = user
+        self.timezone_str = timezone_str
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            day = int(self.birth_day.value.strip())
+            month = int(self.birth_month.value.strip())
+            if not (1 <= day <= 31) or not (1 <= month <= 12):
+                raise ValueError
+            datetime(2000, month, day)
+        except (ValueError, TypeError):
+            await interaction.response.send_message("❌ Invalid date. Please enter a valid day and month.", ephemeral=True)
+            return
+        BIRTHDAY_CONFIG[self.target_user.id] = {"day": day, "month": month, "timezone": self.timezone_str}
+        save_birthday_config()
+        await interaction.response.send_message(
+            f"✅ Updated {self.target_user.mention}'s birthday to **{day}/{month}** ({self.timezone_str}).",
+            ephemeral=True
+        )
+
+class EditTimezoneSelect(discord.ui.Select):
+    def __init__(self, group_name: str, timezones: list, target_user: discord.Member):
+        self.target_user = target_user
+        options = [discord.SelectOption(label=tz, value=tz) for tz in timezones]
+        super().__init__(placeholder=f"Pick timezone — {group_name}", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(EditBirthdayModal(self.target_user, self.values[0]))
+
+class EditTimezoneView(discord.ui.View):
+    def __init__(self, target_user: discord.Member):
+        super().__init__(timeout=60)
+        for group_name, timezones in TIMEZONE_GROUPS.items():
+            self.add_item(EditTimezoneSelect(group_name, timezones, target_user))
+
+@bot.tree.command(name="edituserbday", description="Edit a specific member's birthday (mod only)")
+@app_commands.describe(user="The member whose birthday you want to edit")
+async def edituserbday(interaction: discord.Interaction, user: discord.Member):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ You don't have permission to do this.", ephemeral=True)
+        return
+    # Pre-fill timezone if they already have one, otherwise show picker
+    existing = BIRTHDAY_CONFIG.get(user.id)
+    if existing:
+        await interaction.response.send_modal(EditBirthdayModal(user, existing["timezone"]))
+    else:
+        view = EditTimezoneView(user)
+        await interaction.response.send_message(
+            f"🌍 Pick a timezone for {user.mention}:",
+            view=view,
+            ephemeral=True
+        )
+
+@bot.tree.command(name="testbirthday", description="Test the birthday wish instantly (mod only)")
+@app_commands.describe(user="The user to test the birthday wish for")
+async def testbirthday(interaction: discord.Interaction, user: discord.Member):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ You don't have permission to do this.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    # DM the user
+    dm_status = "✅ DM sent"
+    try:
+        await user.send(
+            f"🎂 **Happy Birthday, {user.display_name}!** 🎉\n"
+            f"Wishing you an amazing day filled with joy! "
+            f"The whole server is celebrating with you! 🥳"
+        )
+    except Exception:
+        dm_status = "❌ DM failed (user may have DMs disabled)"
+
+    # Post in birthday channel
+    channel_status = "✅ Server announcement sent"
+    if BIRTHDAY_WISH_CHANNEL_ID:
+        channel = bot.get_channel(BIRTHDAY_WISH_CHANNEL_ID)
+        if channel:
+            await channel.send(
+                f"@everyone\n"
+                f"🎂 Today is {user.mention}'s birthday! "
+                f"Let's all wish them a Happy Birthday! 🎉🥳"
+            )
+        else:
+            channel_status = "❌ Birthday channel not found"
+    else:
+        channel_status = "❌ No birthday channel set — use /setbirthdaychannel first"
+
+    await interaction.followup.send(
+        f"**Birthday test for {user.mention}:**\n{dm_status}\n{channel_status}",
+        ephemeral=True
+    )
+
+async def birthday_checker():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        now_utc = datetime.now(timezone.utc)
+        for user_id, data in list(BIRTHDAY_CONFIG.items()):
+            try:
+                tz = pytz.timezone(data["timezone"])
+                now_local = now_utc.astimezone(tz)
+                if now_local.month == data["month"] and now_local.day == data["day"] and now_local.hour == 0 and now_local.minute == 0:
+                    last_wished = data.get("last_wished")
+                    if last_wished != now_local.year:
+                        # DM the birthday person
+                        try:
+                            user = await bot.fetch_user(user_id)
+                            await user.send(
+                                f"🎂 **Happy Birthday, {user.display_name}!** 🎉\n"
+                                f"Wishing you an amazing day filled with joy! "
+                                f"The whole server is celebrating with you! 🥳"
+                            )
+                        except Exception:
+                            pass  # DMs may be closed
+
+                        # Ping @everyone in birthday channel
+                        if BIRTHDAY_WISH_CHANNEL_ID:
+                            channel = bot.get_channel(BIRTHDAY_WISH_CHANNEL_ID)
+                            if channel:
+                                await channel.send(
+                                    f"@everyone\n"
+                                    f"🎂 Today is <@{user_id}>'s birthday! "
+                                    f"Let's all wish them a Happy Birthday! 🎉🥳"
+                                )
+                        BIRTHDAY_CONFIG[user_id]["last_wished"] = now_local.year
+                        save_birthday_config()
+            except Exception as e:
+                print(f"Birthday check error for {user_id}: {e}")
+        await asyncio.sleep(60)
 
 bot.run(TOKEN)
