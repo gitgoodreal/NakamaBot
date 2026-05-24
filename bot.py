@@ -44,9 +44,6 @@ _welcome_channel_override = {}
 VERIFY_CONFIG = {}
 VERIFY_CONFIG_FILE = "verify_config.json"
 
-# ── Change 4: redirect to Discord after OAuth ──────────────────────────────────
-# The Cloudflare worker should redirect to this URL after auth succeeds.
-# Set your redirect URI in the OAuth2 app to:  https://discord.com/channels/@me
 VERIFY_URL = "https://nakama-auth.existslays.workers.dev"
 
 def save_verify_config():
@@ -220,10 +217,6 @@ async def handle_verification_success(interaction: discord.Interaction):
     _verifying_now.discard(member.id)
     await log_action(guild, "Member Verified", bot.user, member)
 
-# ── Change 5: DM-based verification ───────────────────────────────────────────
-# Users can verify via DM as well as in the server.
-# The bot listens for DMs and triggers verification there too.
-
 class DMVerifyView(discord.ui.View):
     """Sent via DM so the user can verify without going to the server channel."""
     def __init__(self, guild_id: int, member: discord.Member):
@@ -390,8 +383,6 @@ async def setupverify(interaction: discord.Interaction):
         )
         return
 
-    # ── Change 1: never auto-create a verification channel ────────────────────
-    # Reuse any previously stored channel; if none, ask the mod to provide one.
     existing_channel = guild.get_channel(existing_config.get("channel_id", 0))
     if not existing_channel:
         await interaction.edit_original_response(
@@ -406,7 +397,6 @@ async def setupverify(interaction: discord.Interaction):
 
     verify_channel = existing_channel
 
-    # Unverified role: reuse existing or create fresh
     unverified_role = guild.get_role(existing_config.get("unverified_role_id", 0))
     if not unverified_role:
         unverified_role = await guild.create_role(
@@ -487,9 +477,6 @@ async def setupverify(interaction: discord.Interaction):
     )
     await log_action(guild, "Verification Setup", interaction.user, verify_channel, f"Method: {method_label}")
 
-# ── /setverifychannel ──────────────────────────────────────────────────────────
-# Since we no longer auto-create the channel, mods set it manually once.
-
 @bot.tree.command(name="setverifychannel", description="Set the channel used for verification")
 @app_commands.describe(channel="The channel you created for verification")
 async def setverifychannel(interaction: discord.Interaction, channel: discord.TextChannel):
@@ -508,9 +495,6 @@ async def setverifychannel(interaction: discord.Interaction, channel: discord.Te
         ephemeral=True
     )
 
-# ── /resetverify ───────────────────────────────────────────────────────────────
-# Change 2: also delete the unverified role on reset.
-
 @bot.tree.command(name="resetverify", description="Reset and redo the verification setup")
 async def resetverify(interaction: discord.Interaction):
     if not has_mod_role(interaction):
@@ -521,7 +505,6 @@ async def resetverify(interaction: discord.Interaction):
     config = VERIFY_CONFIG.pop(guild.id, None)
 
     if config:
-        # Delete the unverified role so it doesn't linger
         unverified_role = guild.get_role(config.get("unverified_role_id", 0))
         if unverified_role:
             try:
@@ -581,7 +564,6 @@ async def on_member_join(member: discord.Member):
     config = VERIFY_CONFIG.get(guild.id)
 
     if config:
-        # Assign unverified role on join
         unverified_role = guild.get_role(config["unverified_role_id"])
         if unverified_role:
             try:
@@ -591,7 +573,6 @@ async def on_member_join(member: discord.Member):
 
         verify_channel = guild.get_channel(config["channel_id"])
 
-        # Send a single embed DM — no verify button, just website link
         try:
             embed = discord.Embed(
                 title=f"👋 Welcome to {guild.name}!",
@@ -631,15 +612,12 @@ async def on_member_update(before: discord.Member, after: discord.Member):
     if not verified_role:
         return
 
-    # Verified role just appeared on this member
     if verified_role not in before.roles and verified_role in after.roles:
-        # Skip if the bot's own verify flow already handled this — avoids double welcome/DM
         if after.id in _verifying_now:
             _verifying_now.discard(after.id)
             return
         print(f"✅ [ROLE UPDATE] {after} just got the verified role in {after.guild.name}")
 
-        # Remove unverified role if still present (worker may have missed it)
         if unverified_role and unverified_role in after.roles:
             try:
                 await after.remove_roles(unverified_role, reason="Verified — cleanup via on_member_update")
@@ -653,13 +631,24 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 
 spam_tracker = {}
 
+# ── MERGED on_message ──────────────────────────────────────────────────────────
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
+    # ── AFK check ────────────────────────────────────────────────────────────
     await on_message_afk(message)
 
+    # ── Custom commands ───────────────────────────────────────────────────────
+    content_stripped = message.content.strip()
+    if content_stripped.startswith("!"):
+        cmd_name = content_stripped[1:].split()[0].lower()
+        if cmd_name in CUSTOM_COMMANDS and CUSTOM_COMMANDS[cmd_name]["enabled"]:
+            await message.channel.send(CUSTOM_COMMANDS[cmd_name]["response"])
+            return
+
+    # ── Bad word filter ───────────────────────────────────────────────────────
     content = message.content.lower()
     if any(word in content for word in BAD_WORDS):
         await message.delete()
@@ -667,6 +656,7 @@ async def on_message(message):
         await log_action(message.guild, "Auto-Mod: Bad Word", bot.user, message.author, message.content)
         return
 
+    # ── Spam detection ────────────────────────────────────────────────────────
     uid = message.author.id
     now = asyncio.get_event_loop().time()
     if uid not in spam_tracker:
@@ -682,11 +672,10 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-    # ── Repost sticky if one exists for this channel ───────────────────────────
+    # ── Sticky messages ───────────────────────────────────────────────────────
     sticky = STICKY_CONFIG.get(message.channel.id)
     if sticky:
         try:
-            # Delete old sticky
             old = await message.channel.fetch_message(sticky["last_id"])
             await old.delete()
         except (discord.NotFound, discord.HTTPException):
@@ -891,9 +880,9 @@ STICKY_CONFIG = {}          # {channel_id: {"message": str, "last_id": int}}
 # ── Birthday system ──────────────────────────────────────────────────────────
 BIRTHDAY_CONFIG = {}        # {user_id: {"day": int, "month": int, "timezone": str}}
 BIRTHDAY_CONFIG_FILE = "birthday_config.json"
-BIRTHDAY_WISH_CHANNEL_ID = 1501909942754344965  # General chat — where wishes are sent
-BIRTHDAY_SETUP_CHANNEL_ID = None               # Birthday wishes channel — where setup chain lives
-BIRTHDAY_LAST_CHAIN_MSG_ID = None              # ID of the last chain message (to disable its button)
+BIRTHDAY_WISH_CHANNEL_ID = 1501909942754344965
+BIRTHDAY_SETUP_CHANNEL_ID = None
+BIRTHDAY_LAST_CHAIN_MSG_ID = None
 
 def save_birthday_config():
     with open(BIRTHDAY_CONFIG_FILE, "w") as f:
@@ -1001,7 +990,6 @@ async def removesticky(interaction: discord.Interaction, channel: discord.TextCh
         await interaction.response.send_message(f"❌ No sticky message found in {channel.mention}.", ephemeral=True)
         return
 
-    # Delete the last sticky message
     try:
         last_msg = await channel.fetch_message(config["last_id"])
         await last_msg.delete()
@@ -1063,7 +1051,6 @@ async def setintrosticky(interaction: discord.Interaction, channel: discord.Text
 
     await interaction.response.defer(ephemeral=True)
 
-    # Delete old sticky if one exists
     old = STICKY_CONFIG.get(channel.id)
     if old:
         try:
@@ -1126,7 +1113,6 @@ class BirthdayModal(discord.ui.Modal, title="🎂 Set Your Birthday"):
             month = int(self.birth_month.value.strip())
             if not (1 <= day <= 31) or not (1 <= month <= 12):
                 raise ValueError
-            # Quick sanity check
             datetime(2000, month, day)
         except (ValueError, TypeError):
             await interaction.response.send_message("❌ Invalid date. Please enter a valid day (1-31) and month (1-12).", ephemeral=True)
@@ -1139,7 +1125,6 @@ class BirthdayModal(discord.ui.Modal, title="🎂 Set Your Birthday"):
         }
         save_birthday_config()
 
-        # Log to the server log channel
         log_channel = interaction.client.get_channel(LOG_CHANNEL_ID)
         if log_channel:
             embed = discord.Embed(title="🎂 Birthday Registered", color=discord.Color.blurple())
@@ -1151,19 +1136,16 @@ class BirthdayModal(discord.ui.Modal, title="🎂 Set Your Birthday"):
             await log_channel.send(embed=embed)
 
         msg = f"\U0001f382 Birthday saved! You'll be wished on **{day}/{month}** at 12:00 AM **{self.timezone_str}**.\n\nWant to add yours too? Click below!"
-        # Post the chain message in the setup channel if configured, else reply inline
         if BIRTHDAY_SETUP_CHANNEL_ID:
             setup_channel = interaction.client.get_channel(BIRTHDAY_SETUP_CHANNEL_ID)
             if setup_channel:
                 global BIRTHDAY_LAST_CHAIN_MSG_ID
-                # Disable the button on the previous chain message
                 if BIRTHDAY_LAST_CHAIN_MSG_ID:
                     try:
                         old_msg = await setup_channel.fetch_message(BIRTHDAY_LAST_CHAIN_MSG_ID)
                         await old_msg.delete()
                     except Exception:
                         pass
-                # Post fresh message with the button
                 new_chain_msg = await setup_channel.send(msg, view=AddBirthdayView())
                 BIRTHDAY_LAST_CHAIN_MSG_ID = new_chain_msg.id
                 save_birthday_config()
@@ -1251,7 +1233,6 @@ async def setbirthdaysetupchannel(interaction: discord.Interaction, channel: dis
     global BIRTHDAY_SETUP_CHANNEL_ID
     BIRTHDAY_SETUP_CHANNEL_ID = channel.id
     save_birthday_config()
-    # Post the initial chain message in the setup channel
     view = AddBirthdayView()
     await channel.send("🎂 **Add your birthday to get wished at midnight!**\nClick the button below to get started.", view=view)
     await interaction.response.send_message(f"✅ Birthday setup channel set to {channel.mention}. The registration button has been posted there!", ephemeral=True)
@@ -1372,7 +1353,6 @@ async def edituserbday(interaction: discord.Interaction, user: discord.Member):
     if not has_mod_role(interaction):
         await interaction.response.send_message("❌ You don't have permission to do this.", ephemeral=True)
         return
-    # Pre-fill timezone if they already have one, otherwise show picker
     existing = BIRTHDAY_CONFIG.get(user.id)
     if existing:
         await interaction.response.send_modal(EditBirthdayModal(user, existing["timezone"]))
@@ -1393,7 +1373,6 @@ async def testbirthday(interaction: discord.Interaction, user: discord.Member):
 
     await interaction.response.defer(ephemeral=True)
 
-    # DM the user
     dm_status = "✅ DM sent"
     try:
         await user.send(
@@ -1404,7 +1383,6 @@ async def testbirthday(interaction: discord.Interaction, user: discord.Member):
     except Exception:
         dm_status = "❌ DM failed (user may have DMs disabled)"
 
-    # Post in birthday channel
     channel_status = "✅ Server announcement sent"
     if BIRTHDAY_WISH_CHANNEL_ID:
         channel = bot.get_channel(BIRTHDAY_WISH_CHANNEL_ID)
@@ -1435,7 +1413,6 @@ async def birthday_checker():
                 if now_local.month == data["month"] and now_local.day == data["day"] and now_local.hour == 0 and now_local.minute == 0:
                     last_wished = data.get("last_wished")
                     if last_wished != now_local.year:
-                        # DM the birthday person
                         try:
                             user = await bot.fetch_user(user_id)
                             await user.send(
@@ -1444,9 +1421,8 @@ async def birthday_checker():
                                 f"The whole server is celebrating with you! 🥳"
                             )
                         except Exception:
-                            pass  # DMs may be closed
+                            pass
 
-                        # Ping @everyone in birthday channel
                         if BIRTHDAY_WISH_CHANNEL_ID:
                             channel = bot.get_channel(BIRTHDAY_WISH_CHANNEL_ID)
                             if channel:
@@ -1463,9 +1439,9 @@ async def birthday_checker():
 
 
 # ── Ticket System ─────────────────────────────────────────────────────────────
-TICKET_CONFIG = {}          # {guild_id: {"category_id": int, "log_channel_id": int}}
+TICKET_CONFIG = {}
 TICKET_CONFIG_FILE = "ticket_config.json"
-TICKET_COUNTER = {}         # {guild_id: int}
+TICKET_COUNTER = {}
 
 def save_ticket_config():
     with open(TICKET_CONFIG_FILE, "w") as f:
@@ -1497,16 +1473,13 @@ class TicketOpenView(discord.ui.View):
             await interaction.response.send_message("❌ Ticket system is not configured yet. Ask a mod to use `/setuptickets`.", ephemeral=True)
             return
 
-        # Check if they already have an open ticket
         for channel in guild.channels:
             if isinstance(channel, discord.TextChannel) and channel.topic and str(member.id) in channel.topic:
                 await interaction.response.send_message(f"❌ You already have an open ticket: {channel.mention}", ephemeral=True)
                 return
 
-        # Get ticket staff role
         ticket_staff_role = discord.utils.get(guild.roles, name="ticket staff")
 
-        # Set up permissions
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             member: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
@@ -1515,15 +1488,12 @@ class TicketOpenView(discord.ui.View):
         if ticket_staff_role:
             overwrites[ticket_staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
-        # Get category if set
         category = guild.get_channel(config.get("category_id")) if config.get("category_id") else None
 
-        # Increment ticket counter
         TICKET_COUNTER[guild.id] = TICKET_COUNTER.get(guild.id, 0) + 1
         ticket_num = TICKET_COUNTER[guild.id]
         save_ticket_config()
 
-        # Create the channel
         channel_name = f"ticket-{ticket_num:04d}-{member.name}"
         ticket_channel = await guild.create_text_channel(
             name=channel_name,
@@ -1533,14 +1503,12 @@ class TicketOpenView(discord.ui.View):
             reason=f"Ticket opened by {member}"
         )
 
-        # Send intro message in the ticket channel
         embed = discord.Embed(
             title="🎫 Ticket Opened",
             description=f"Hey {member.mention}! A staff member will be with you shortly.\n\nPlease describe your issue in detail.",
             color=discord.Color.blurple()
         )
         embed.set_footer(text=f"Ticket #{ticket_num:04d}")
-        # Ping the configured role if set
         ping_role_id = config.get("ping_role_id")
         ping_content = member.mention
         if ping_role_id:
@@ -1549,7 +1517,6 @@ class TicketOpenView(discord.ui.View):
                 ping_content = f"{member.mention} | {ping_role.mention}"
         await ticket_channel.send(content=ping_content, embed=embed, view=TicketActionView())
 
-        # Log it
         log_channel_id = config.get("log_channel_id")
         if log_channel_id:
             log_channel = guild.get_channel(log_channel_id)
@@ -1564,7 +1531,6 @@ class TicketOpenView(discord.ui.View):
         await interaction.response.send_message(f"✅ Your ticket has been created: {ticket_channel.mention}", ephemeral=True)
 
 class TicketCloseView(discord.ui.View):
-    """Shown after ticket is claimed — only close button remains."""
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -1573,7 +1539,6 @@ class TicketCloseView(discord.ui.View):
         await handle_ticket_close(interaction)
 
 class TicketActionView(discord.ui.View):
-    """Shown when ticket is first opened — claim + close buttons."""
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -1590,16 +1555,13 @@ class TicketActionView(discord.ui.View):
             await interaction.response.send_message("❌ Only ticket staff can claim tickets.", ephemeral=True)
             return
 
-        # Remove ticket staff role access, keep only the claimer
         if ticket_staff_role:
             await channel.set_permissions(ticket_staff_role, view_channel=False, send_messages=False)
         await channel.set_permissions(claimer, view_channel=True, send_messages=True, read_message_history=True)
 
-        # Update topic to record claimer
         new_topic = (channel.topic or "") + f" | claimed_by:{claimer.id}"
         await channel.edit(topic=new_topic)
 
-        # Replace this message with just the close button
         embed = discord.Embed(
             title="✋ Ticket Claimed",
             description=f"This ticket has been claimed by {claimer.mention}.\nAll other staff have been removed.",
@@ -1609,7 +1571,6 @@ class TicketActionView(discord.ui.View):
 
         await channel.send(f"✅ {claimer.mention} has claimed this ticket and will assist you shortly.")
 
-        # Log claim
         config = TICKET_CONFIG.get(guild.id, {})
         log_channel_id = config.get("log_channel_id")
         if log_channel_id:
@@ -1678,7 +1639,6 @@ async def setuptickets(interaction: discord.Interaction,
     }
     save_ticket_config()
 
-    # Post the open ticket button
     embed = discord.Embed(
         title="🎫 Support Tickets",
         description="Need help? Click the button below to open a private ticket with our staff.",
@@ -1931,7 +1891,7 @@ async def ignorerole(interaction: discord.Interaction, role: discord.Role):
         await interaction.response.send_message(f"✅ Commands disabled for **{role.name}**.", ephemeral=True)
 
 # ── Custom Commands ───────────────────────────────────────────────────────────
-CUSTOM_COMMANDS = {}  # {name: {"response": str, "enabled": bool}}
+CUSTOM_COMMANDS = {}
 CUSTOM_COMMANDS_FILE = "custom_commands.json"
 
 def save_custom_commands():
@@ -2002,16 +1962,6 @@ async def customcmd(interaction: discord.Interaction, action: str, name: str = N
         else:
             await interaction.response.send_message("❌ Command not found.", ephemeral=True)
 
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-    content = message.content.strip()
-    if content.startswith("!"):
-        cmd_name = content[1:].split()[0].lower()
-        if cmd_name in CUSTOM_COMMANDS and CUSTOM_COMMANDS[cmd_name]["enabled"]:
-            await message.channel.send(CUSTOM_COMMANDS[cmd_name]["response"])
-
 # ── Announce ──────────────────────────────────────────────────────────────────
 @bot.tree.command(name="announce", description="Send an announcement (mod only)")
 @app_commands.describe(channel="Channel to send to", message="The announcement", ping="Who to ping: none, everyone, here, or a role name")
@@ -2034,7 +1984,7 @@ async def announce(interaction: discord.Interaction, channel: discord.TextChanne
 # ── Giveaway System ───────────────────────────────────────────────────────────
 import re
 
-GIVEAWAYS = {}  # {message_id: {channel_id, winners, end_time, name, entries}}
+GIVEAWAYS = {}
 GIVEAWAYS_FILE = "giveaways.json"
 
 def save_giveaways():
@@ -2139,7 +2089,6 @@ async def conclude_giveaway(message_id: int, reroll: bool = False):
     except Exception:
         return
 
-    # Collect entries from reactions
     entries = []
     for reaction in msg.reactions:
         if str(reaction.emoji) == "🎉":
