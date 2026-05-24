@@ -550,6 +550,29 @@ async def on_ready():
     bot.add_view(TicketCloseView())
     bot.loop.create_task(birthday_checker())
     await bot.tree.sync()
+
+    # Repost sticky messages that may have been lost during downtime
+    for channel_id, config in list(STICKY_CONFIG.items()):
+        try:
+            channel = bot.get_channel(channel_id)
+            if not channel:
+                continue
+            try:
+                await channel.fetch_message(config["last_id"])
+            except discord.NotFound:
+                msg_text = config.get("message", "")
+                style = config.get("style", "plain")
+                if style == "embed":
+                    embed = discord.Embed(description=msg_text, color=discord.Color.gold())
+                    embed.set_footer(text="\U0001f4cc Sticky Message")
+                    sent = await channel.send(embed=embed)
+                else:
+                    sent = await channel.send(msg_text)
+                STICKY_CONFIG[channel_id]["last_id"] = sent.id
+                save_sticky_config()
+                print(f"✅ Reposted sticky in #{channel.name}")
+        except Exception as e:
+            print(f"⚠️ Could not repost sticky in channel {channel_id}: {e}")
     print(f"✅ {bot.user} is online! Synced slash commands globally.")
 
 @bot.event
