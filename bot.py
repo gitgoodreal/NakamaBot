@@ -534,6 +534,8 @@ async def on_ready():
     bot.loop.create_task(birthday_checker())
     await bot.tree.sync()
 
+    await asyncio.sleep(3)  # Wait for channel cache to populate
+
     # Repost sticky messages that may have been lost during downtime
     for channel_id, config in list(STICKY_CONFIG.items()):
         try:
@@ -725,7 +727,6 @@ async def afk(interaction: discord.Interaction, reason: str = "AFK"):
     except discord.Forbidden:
         pass
 
-@bot.event
 async def on_message_afk(message):
     if message.author.id in AFK_USERS:
         afk_data = AFK_USERS.pop(message.author.id)
