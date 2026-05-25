@@ -633,6 +633,115 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 
 spam_tracker = {}
 
+# ── Nakama GIF system ──────────────────────────────────────────────────────────
+NAKAMA_GIF_MAP = {
+    "cry":      "cry",
+    "crying":   "cry",
+    "hug":      "hug",
+    "hugs":     "hug",
+    "pat":      "pat",
+    "pats":     "pat",
+    "slap":     "slap",
+    "slaps":    "slap",
+    "punch":    "punch",
+    "punches":  "punch",
+    "wave":     "wave",
+    "waving":   "wave",
+    "smile":    "smile",
+    "smiling":  "smile",
+    "happy":    "smile",
+    "dance":    "dance",
+    "dancing":  "dance",
+    "poke":     "poke",
+    "poking":   "poke",
+    "blush":    "blush",
+    "blushing": "blush",
+    "facepalm": "facepalm",
+    "bonk":     "bonk",
+    "bonks":    "bonk",
+    "baka":     "baka",
+    "nom":      "nom",
+    "bite":     "bite",
+    "bites":    "bite",
+    "highfive": "highfive",
+    "yeet":     "yeet",
+    "laugh":    "laugh",
+    "laughing": "laugh",
+}
+
+NAKAMA_GIF_MESSAGES = {
+    "cry":       ("😢 {author} is crying...", "😢 {author} cries on {target}'s shoulder..."),
+    "hug":       ("🤗 {author} hugs the air!", "There there~ 🤗 {author} hugs {target}!"),
+    "pat":       ("👋 {author} pats themselves?", "( ´ ▽ ` ) {author} pats {target}!"),
+    "slap":      ("👋 {author} slaps the air!", "👋 {author} slaps {target}! Ouch!"),
+    "punch":     ("👊 {author} punches the air!", "👊 {author} punches {target}! BAM!"),
+    "wave":      ("👋 {author} waves!", "👋 {author} waves at {target}!"),
+    "smile":     ("😊 {author} smiles!", "😊 {author} smiles at {target}!"),
+    "dance":     ("💃 {author} is dancing!", "💃 {author} dances with {target}!"),
+    "poke":      ("👉 {author} pokes the air!", "👉 {author} pokes {target}!"),
+    "blush":     ("😳 {author} is blushing!", "😳 {author} blushes at {target}!"),
+    "facepalm":  ("🤦 {author} facepalms!", "🤦 {author} facepalms at {target}..."),
+    "bonk":      ("🔨 {author} bonks the air!", "🔨 {author} bonks {target}! No horny!"),
+    "baka":      ("😤 {author} calls someone baka!", "😤 {author} calls {target} a baka!"),
+    "nom":       ("😋 {author} noms!", "😋 {author} noms {target}!"),
+    "bite":      ("😬 {author} bites the air!", "😬 {author} bites {target}!"),
+    "highfive":  ("🙌 {author} wants a high five!", "🙌 {author} high fives {target}!"),
+    "yeet":      ("🌀 {author} yeeted themselves!", "🌀 {author} yeets {target} into the sky!"),
+    "laugh":     ("😂 {author} is laughing!", "😂 {author} laughs at {target}!")}
+
+async def on_message_nakama(message):
+    content = message.content.lower()
+    words = content.split()
+
+    if not words or words[0] != "nakama":
+        return
+
+    category = None
+    for word in words[1:]:
+        clean = word.strip("!?,.")
+        if clean in NAKAMA_GIF_MAP:
+            category = NAKAMA_GIF_MAP[clean]
+            break
+
+    if not category:
+        return
+
+    # Pull live display names from Discord
+    author_name = message.author.display_name
+    target = message.mentions[0] if message.mentions else None
+    target_name = target.display_name if target else None
+
+    messages = NAKAMA_GIF_MESSAGES.get(
+        category,
+        ("{author} uses " + category + "!", "{author} uses " + category + " on {target}!")
+    )
+
+    if target_name:
+        text = messages[1].format(author=author_name, target=target_name)
+    else:
+        text = messages[0].format(author=author_name)
+
+    import aiohttp
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://api.waifu.pics/sfw/{category}") as resp:
+                if resp.status != 200:
+                    return
+                data = await resp.json()
+                gif_url = data.get("url")
+                if not gif_url:
+                    return
+    except Exception:
+        return
+
+    embed = discord.Embed(description=text, color=discord.Color.gold())
+    embed.set_image(url=gif_url)
+    embed.set_footer(text="🏴‍☠️ NakamaBot")
+    await message.channel.send(embed=embed)
+
+
+    
+
 # ── MERGED on_message ──────────────────────────────────────────────────────────
 @bot.event
 async def on_message(message):
@@ -641,6 +750,9 @@ async def on_message(message):
 
     # ── AFK check ────────────────────────────────────────────────────────────
     await on_message_afk(message)
+
+    # ── Nakama GIF trigger ────────────────────────────────────────────────────
+    await on_message_nakama(message)
 
     # ── Custom commands ───────────────────────────────────────────────────────
     content_stripped = message.content.strip()
