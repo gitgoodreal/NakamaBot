@@ -4,6 +4,8 @@ from discord import app_commands
 import os
 import asyncio
 import json
+import re
+import aiohttp
 from datetime import timedelta, datetime, timezone
 import pytz
 from dotenv import load_dotenv
@@ -35,7 +37,7 @@ WELCOME_ROLES = [
 CHANNELS_PER_ROW = 2
 
 LOG_CHANNEL_ID = 1501943719249707018
-_verifying_now = set()  # Tracks users mid-verification to prevent on_member_update double-firing
+_verifying_now = set()
 ROLE_HIERARCHY = ["King of the Pirates", "Admin", "Manager", "Moderator"]
 BAD_WORDS = ["badword1", "badword2"]
 WARNINGS = {}
@@ -109,6 +111,21 @@ def build_welcome_embed(member: discord.Member) -> discord.Embed:
     embed.set_footer(text="Welcome to the crew! ⚓")
     return embed
 
+def format_timedelta(delta: timedelta) -> str:
+    days = delta.days
+    years, days = divmod(days, 365)
+    months, days = divmod(days, 30)
+
+    parts = []
+    if years:
+        parts.append(f"{years} year{'s' if years != 1 else ''}")
+    if months:
+        parts.append(f"{months} month{'s' if months != 1 else ''}")
+    if days or not parts:
+        parts.append(f"{days} day{'s' if days != 1 else ''}")
+
+    return ", ".join(parts)
+
 # ── Verification views ─────────────────────────────────────────────────────────
 
 class VerifyButtonView(discord.ui.View):
@@ -159,7 +176,6 @@ class QuestionVerifyView(discord.ui.View):
         await interaction.response.send_modal(modal)
 
 async def handle_verification_success(interaction: discord.Interaction):
-    """Shared handler for all in-server verification methods."""
     config = VERIFY_CONFIG.get(interaction.guild.id)
     if not config:
         print(f"❌ [VERIFY] No config found for guild {interaction.guild.id}")
@@ -218,9 +234,8 @@ async def handle_verification_success(interaction: discord.Interaction):
     await log_action(guild, "Member Verified", bot.user, member)
 
 class DMVerifyView(discord.ui.View):
-    """Sent via DM so the user can verify without going to the server channel."""
     def __init__(self, guild_id: int, member: discord.Member):
-        super().__init__(timeout=600)  # 10-minute window
+        super().__init__(timeout=600)
         self.guild_id = guild_id
         self.member = member
 
@@ -534,9 +549,8 @@ async def on_ready():
     bot.loop.create_task(birthday_checker())
     await bot.tree.sync()
 
-    await asyncio.sleep(3)  # Wait for channel cache to populate
+    await asyncio.sleep(3)
 
-    # Repost sticky messages that may have been lost during downtime
     for channel_id, config in list(STICKY_CONFIG.items()):
         try:
             channel = bot.get_channel(channel_id)
@@ -594,7 +608,6 @@ async def on_member_join(member: discord.Member):
     else:
         print(f"⚠️ No verify config for guild {guild.id}")
 
-    # Welcome embed
     channel_id = get_welcome_channel_id(guild.id)
     channel = guild.get_channel(channel_id)
     if channel:
@@ -602,8 +615,28 @@ async def on_member_join(member: discord.Member):
         await channel.send(content=member.mention, embed=embed)
 
 @bot.event
+async def on_member_remove(member: discord.Member):
+    guild = member.guild
+
+    channel_id = get_welcome_channel_id(guild.id)
+    channel = guild.get_channel(channel_id)
+    if not channel:
+        return
+
+    if member.joined_at:
+        time_in_server = format_timedelta(datetime.now(timezone.utc) - member.joined_at)
+        time_text = f"They were with us for **{time_in_server}**."
+    else:
+        time_text = ""
+
+    await channel.send(
+        f"👋 **{member.display_name}** has left the server. "
+        f"We're now at **{guild.member_count}** crew member{'s' if guild.member_count != 1 else ''}. "
+        f"{time_text}"
+    )
+
+@bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
-    """Watch for the verified role being added (e.g. via website OAuth) and DM the user."""
     config = VERIFY_CONFIG.get(after.guild.id)
     if not config:
         return
@@ -687,26 +720,34 @@ NAKAMA_GIF_MESSAGES = {
     "bite":      ("😬 {author} bites the air!", "😬 {author} bites {target}!"),
     "highfive":  ("🙌 {author} wants a high five!", "🙌 {author} high fives {target}!"),
     "yeet":      ("🌀 {author} yeeted themselves!", "🌀 {author} yeets {target} into the sky!"),
-    "laugh":     ("😂 {author} is laughing!", "😂 {author} laughs at {target}!")}
+    "laugh":     ("😂 {author} is laughing!", "😂 {author} laughs at {target}!"),
+}
 
 async def on_message_nakama(message):
-    content = message.content.lower()
+    print(f"[NAKAMA] triggered with: '{message.content}'")
+
+    content = message.content.lower().strip()
     words = content.split()
 
+    print(f"[NAKAMA] words: {words}")
+
     if not words or words[0] != "nakama":
+        print("[NAKAMA] first word is not 'nakama', returning")
         return
 
     category = None
     for word in words[1:]:
         clean = word.strip("!?,.")
+        print(f"[NAKAMA] checking word: '{clean}'")
         if clean in NAKAMA_GIF_MAP:
             category = NAKAMA_GIF_MAP[clean]
+            print(f"[NAKAMA] matched category: {category}")
             break
 
     if not category:
+        print("[NAKAMA] no matching category found, returning")
         return
 
-    # Pull live display names from Discord
     author_name = message.author.display_name
     target = message.mentions[0] if message.mentions else None
     target_name = target.display_name if target else None
@@ -721,26 +762,38 @@ async def on_message_nakama(message):
     else:
         text = messages[0].format(author=author_name)
 
-    import aiohttp
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"https://api.waifu.pics/sfw/{category}") as resp:
-                if resp.status != 200:
-                    return
-                data = await resp.json()
-                gif_url = data.get("url")
-                if not gif_url:
-                    return
-    except Exception:
+    print(f"[NAKAMA] fetching GIF for category: {category}")
+
+    gif_url = None
+    for attempt in range(3):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"https://api.waifu.pics/sfw/{category}",
+                    timeout=aiohttp.ClientTimeout(total=8)
+                ) as resp:
+                    print(f"[NAKAMA] waifu.pics response status: {resp.status} (attempt {attempt + 1})")
+                    if resp.status == 200:
+                        data = await resp.json()
+                        gif_url = data.get("url")
+                        if gif_url:
+                            print(f"[NAKAMA] got GIF URL: {gif_url}")
+                            break
+        except Exception as e:
+            print(f"[NAKAMA] aiohttp error on attempt {attempt + 1}: {e}")
+            await asyncio.sleep(1)
+
+    if not gif_url:
+        print("[NAKAMA] all attempts failed, aborting")
+        await message.channel.send(f"{text} *(GIF unavailable right now)*")
         return
 
     embed = discord.Embed(description=text, color=discord.Color.gold())
     embed.set_image(url=gif_url)
     embed.set_footer(text="🏴‍☠️ NakamaBot")
     await message.channel.send(embed=embed)
+    print(f"[NAKAMA] embed sent successfully!")
 
-
-    
 
 # ── MERGED on_message ──────────────────────────────────────────────────────────
 @bot.event
@@ -988,10 +1041,10 @@ async def removerole(interaction: discord.Interaction, member: discord.Member, r
 
 # ── Sticky Messages ────────────────────────────────────────────────────────────
 
-STICKY_CONFIG = {}          # {channel_id: {"message": str, "last_id": int}}
+STICKY_CONFIG = {}
 
 # ── Birthday system ──────────────────────────────────────────────────────────
-BIRTHDAY_CONFIG = {}        # {user_id: {"day": int, "month": int, "timezone": str}}
+BIRTHDAY_CONFIG = {}
 BIRTHDAY_CONFIG_FILE = "birthday_config.json"
 BIRTHDAY_WISH_CHANNEL_ID = 1501909942754344965
 BIRTHDAY_SETUP_CHANNEL_ID = None
@@ -1508,7 +1561,7 @@ async def testbirthday(interaction: discord.Interaction, user: discord.Member):
         else:
             channel_status = "❌ Birthday channel not found"
     else:
-        channel_status = "❌ No birthday channel set — use /setbirthdaychannel first"
+        channel_status = "❌ No birthday channel set — use /setwishchannel first"
 
     await interaction.followup.send(
         f"**Birthday test for {user.mention}:**\n{dm_status}\n{channel_status}",
@@ -2095,7 +2148,6 @@ async def announce(interaction: discord.Interaction, channel: discord.TextChanne
     await interaction.response.send_message(f"✅ Announcement sent to {channel.mention}.", ephemeral=True)
 
 # ── Giveaway System ───────────────────────────────────────────────────────────
-import re
 
 GIVEAWAYS = {}
 GIVEAWAYS_FILE = "giveaways.json"
@@ -2115,7 +2167,6 @@ def load_giveaways():
 load_giveaways()
 
 def parse_duration(duration: str) -> int:
-    """Convert duration string like 1h, 30m, 2d to seconds."""
     units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
     match = re.fullmatch(r"(\d+)([smhd])", duration.strip().lower())
     if not match:
@@ -2227,7 +2278,6 @@ async def addemote(interaction: discord.Interaction, name: str, url: str):
         await interaction.response.send_message("❌ No permission.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
-    import aiohttp
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             if resp.status != 200:
