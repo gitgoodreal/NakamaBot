@@ -92,6 +92,21 @@ def build_welcome_embed(member: discord.Member) -> discord.Embed:
     embed.set_footer(text="Welcome to the crew! ⚓")
     return embed
 
+def format_timedelta(delta: timedelta) -> str:
+    days = delta.days
+    years, days = divmod(days, 365)
+    months, days = divmod(days, 30)
+
+    parts = []
+    if years:
+        parts.append(f"{years} year{'s' if years != 1 else ''}")
+    if months:
+        parts.append(f"{months} month{'s' if months != 1 else ''}")
+    if days or not parts:
+        parts.append(f"{days} day{'s' if days != 1 else ''}")
+
+    return ", ".join(parts)
+
 # ── Events ─────────────────────────────────────────────────────────────────────
 
 @bot.event
@@ -135,6 +150,24 @@ async def on_member_join(member: discord.Member):
     if channel:
         embed = build_welcome_embed(member)
         await channel.send(content=member.mention, embed=embed)
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    guild = member.guild
+    channel_id = get_welcome_channel_id(guild.id)
+    channel = guild.get_channel(channel_id)
+    if not channel:
+        return
+    if member.joined_at:
+        time_in_server = format_timedelta(datetime.now(timezone.utc) - member.joined_at)
+        time_text = f"They were with us for **{time_in_server}**."
+    else:
+        time_text = ""
+    await channel.send(
+        f"👋 **{member.display_name}** has left the server. "
+        f"We're now at **{guild.member_count}** crew member{'s' if guild.member_count != 1 else ''}. "
+        f"{time_text}"
+    )
 
 spam_tracker = {}
 
