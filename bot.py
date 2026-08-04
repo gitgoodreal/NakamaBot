@@ -113,6 +113,16 @@ COMMAND_CATEGORIES = {
         ("/customcmd", "Create/manage custom !commands"),
         ("/afk", "Set your AFK status"),
     ],
+    "💰 Bounty Board": [
+        ("/mycharacter", "Join the Bounty Board (first use) or view your character"),
+        ("/tutorial", "Learn how the bounty game works"),
+        ("/battle", "Challenge another pirate to a bounty battle"),
+        ("/bounty", "View your (or someone's) bounty profile"),
+        ("/daily", "Claim your daily bounty reward (streak-based)"),
+        ("/reroll", "Reroll for a new random character (costs bounty, 24h cooldown)"),
+        ("/bountyboard", "See the top bounties in the server"),
+        ("/givebounty", "Award bounty to a member (mod only)"),
+    ],
 }
 
 # Nakama action words are their own thing (not a slash command), shown
@@ -249,6 +259,898 @@ def format_timedelta(delta: timedelta) -> str:
         parts.append(f"{days} day{'s' if days != 1 else ''}")
 
     return ", ".join(parts)
+
+# ============================================================================
+# BOUNTY BOARD + CHARACTER ROSTER — FINAL VERSION
+# Paste this whole block anywhere in bot.py, after `bot = commands.Bot(...)`.
+# Requires: json, os, random, datetime/timezone (already imported in bot.py)
+# ============================================================================
+
+GITHUB_BASE = "https://raw.githubusercontent.com/gitgoodreal/NakamaBot/main/images"
+
+def make_stages(names_and_urls):
+    return [
+        {"min_level": lvl, "stage_name": name, "image_url": url, "stage_mult": 1.0 + (i * 0.05)}
+        for i, (lvl, name, url) in enumerate(names_and_urls)
+    ]
+
+CHARACTERS = [
+    {
+        "name": "Monkey D. Luffy",
+        "rarity": "Legendary",
+        "stat_mult": {"attack": 1.25, "defense": 0.95, "speed": 1.05, "hp": 1.0},
+        "moves": [
+            {"name": "Rubber Pistol",     "power": 45,  "accuracy": 100, "unlock": 1},
+            {"name": "Rubber Gatling",    "power": 65,  "accuracy": 90,  "unlock": 10},
+            {"name": "Gear Second Rush",  "power": 0,   "accuracy": 100, "unlock": 15, "guard": True},
+            {"name": "Red Roc",           "power": 135, "accuracy": 65,  "unlock": 45},
+        ],
+        "stages": make_stages([
+            (1,  "East Blue Straw Hat", f"{GITHUB_BASE}/luffy/level1luffy.jpg"),
+            (15, "Alabasta Adventurer", f"{GITHUB_BASE}/luffy/level2luffy.jpg"),
+            (30, "Enies Lobby Fighter", f"{GITHUB_BASE}/luffy/level3luffy.jpg"),
+            (45, "New World Captain",   f"{GITHUB_BASE}/luffy/level4luffy.jpg"),
+            (60, "Awakened Gear Form",  f"{GITHUB_BASE}/luffy/level5luffy.jpg"),
+        ]),
+    },
+    {
+        "name": "Roronoa Zoro",
+        "rarity": "Rare",
+        "stat_mult": {"attack": 1.3, "defense": 1.0, "speed": 0.95, "hp": 0.95},
+        "moves": [
+            {"name": "Onigiri Slash",      "power": 50,  "accuracy": 95,  "unlock": 1},
+            {"name": "Tiger Trap",         "power": 60,  "accuracy": 90,  "unlock": 10},
+            {"name": "Iron Stance",        "power": 0,   "accuracy": 100, "unlock": 15, "guard": True},
+            {"name": "Three-Sword Cyclone","power": 125, "accuracy": 65,  "unlock": 45},
+        ],
+        "stages": make_stages([
+            (1,  "East Blue Swordsman",     f"{GITHUB_BASE}/zoro/level1zoro.jpg"),
+            (15, "Baroque Works Era",       f"{GITHUB_BASE}/zoro/level2zoro.jpg"),
+            (30, "Enies Lobby Duelist",     f"{GITHUB_BASE}/zoro/level3zoro.jpg"),
+            (45, "Post-Timeskip Swordsman", f"{GITHUB_BASE}/zoro/level4zoro.jpg"),
+            (60, "Wano Onigashima Form",    f"{GITHUB_BASE}/zoro/level5zoro.jpg"),
+        ]),
+    },
+    {
+        "name": "Sanji",
+        "rarity": "Rare",
+        "stat_mult": {"attack": 1.15, "defense": 0.95, "speed": 1.2, "hp": 0.95},
+        "moves": [
+            {"name": "Collier Kick",       "power": 45,  "accuracy": 95,  "unlock": 1},
+            {"name": "Diable Step",        "power": 65,  "accuracy": 85,  "unlock": 10},
+            {"name": "Sky Guard",          "power": 0,   "accuracy": 100, "unlock": 15, "guard": True},
+            {"name": "Blazing Party Kick", "power": 120, "accuracy": 70,  "unlock": 45},
+        ],
+        "stages": make_stages([
+            (1,  "East Blue Cook",         f"{GITHUB_BASE}/sanji/level1sanji.jpg"),
+            (15, "Baratie Sous Chef",      f"{GITHUB_BASE}/sanji/level2sanji.jpg"),
+            (30, "Enies Lobby Fighter",    f"{GITHUB_BASE}/sanji/level3sanji.jpg"),
+            (45, "Post-Timeskip Vinsmoke", f"{GITHUB_BASE}/sanji/level4sanji.jpg"),
+            (60, "Ignition Form",          f"{GITHUB_BASE}/sanji/level5sanji.jpg"),
+        ]),
+    },
+    {
+        "name": "Nico Robin",
+        "rarity": "Rare",
+        "stat_mult": {"attack": 1.1, "defense": 1.1, "speed": 0.9, "hp": 1.0},
+        "moves": [
+            {"name": "Twin Arms",          "power": 45,  "accuracy": 95,  "unlock": 1},
+            {"name": "Hundred Fleur",      "power": 70,  "accuracy": 85,  "unlock": 10},
+            {"name": "Clutch Guard",       "power": 0,   "accuracy": 100, "unlock": 15, "guard": True},
+            {"name": "Gigantesco Mano",    "power": 125, "accuracy": 65,  "unlock": 45},
+        ],
+        "stages": make_stages([
+            (1,  "Baroque Works Agent",     f"{GITHUB_BASE}/robin/level1robin.jpg"),
+            (15, "Straw Hat Archaeologist", f"{GITHUB_BASE}/robin/level2robin.jpg"),
+            (30, "Enies Lobby Scholar",     f"{GITHUB_BASE}/robin/level3robin.jpg"),
+            (45, "Post-Timeskip Robin",     f"{GITHUB_BASE}/robin/level4robin.jpg"),
+            (60, "Full Bloom Form",         f"{GITHUB_BASE}/robin/level5robin.jpg"),
+        ]),
+    },
+    {
+        "name": "Franky",
+        "rarity": "Rare",
+        "stat_mult": {"attack": 1.2, "defense": 1.15, "speed": 0.8, "hp": 1.1},
+        "moves": [
+            {"name": "Strong Hammer",      "power": 50,  "accuracy": 95,  "unlock": 1},
+            {"name": "Weapons Left",       "power": 65,  "accuracy": 85,  "unlock": 10},
+            {"name": "Iron Body Guard",    "power": 0,   "accuracy": 100, "unlock": 15, "guard": True},
+            {"name": "Radical Beam",       "power": 130, "accuracy": 60,  "unlock": 45},
+        ],
+        "stages": make_stages([
+            (1,  "Water 7 Shipwright",      f"{GITHUB_BASE}/franky/level1franky.jpg"),
+            (15, "Franky House Boss",       f"{GITHUB_BASE}/franky/level2franky.jpg"),
+            (30, "Enies Lobby Cyborg",      f"{GITHUB_BASE}/franky/level3franky.jpg"),
+            (45, "General Franky",          f"{GITHUB_BASE}/franky/level4franky.jpg"),
+            (60, "Radical Overhaul",        f"{GITHUB_BASE}/franky/level5franky.jpg"),
+        ]),
+    },
+    {
+        "name": "Nami",
+        "rarity": "Common",
+        "stat_mult": {"attack": 0.85, "defense": 0.85, "speed": 1.3, "hp": 0.9},
+        "moves": [
+            {"name": "Weather Staff Jab",  "power": 35,  "accuracy": 100, "unlock": 1},
+            {"name": "Thunderbolt Tempo",  "power": 60,  "accuracy": 85,  "unlock": 10},
+            {"name": "Mirage Guard",       "power": 0,   "accuracy": 100, "unlock": 15, "guard": True},
+            {"name": "Thunder Lance",      "power": 110, "accuracy": 70,  "unlock": 45},
+        ],
+        "stages": make_stages([
+            (1,  "East Blue Navigator",     f"{GITHUB_BASE}/nami/level1nami.jpg"),
+            (15, "Baroque Works Era",       f"{GITHUB_BASE}/nami/level2nami.jpg"),
+            (30, "Enies Lobby Navigator",   f"{GITHUB_BASE}/nami/level3nami.jpg"),
+            (45, "Post-Timeskip Nami",      f"{GITHUB_BASE}/nami/level4nami.jpg"),
+            (60, "Zeus-Empowered Form",     f"{GITHUB_BASE}/nami/level5nami.jpg"),
+        ]),
+    },
+    {
+        "name": "Usopp",
+        "rarity": "Common",
+        "stat_mult": {"attack": 0.9, "defense": 0.9, "speed": 1.15, "hp": 0.9},
+        "moves": [
+            {"name": "Sling Shot",         "power": 35,  "accuracy": 100, "unlock": 1},
+            {"name": "Green Star Barrage", "power": 55,  "accuracy": 90,  "unlock": 10},
+            {"name": "Smokescreen Guard",  "power": 0,   "accuracy": 100, "unlock": 15, "guard": True},
+            {"name": "Fire Bird Star",     "power": 105, "accuracy": 70,  "unlock": 45},
+        ],
+        "stages": make_stages([
+            (1,  "East Blue Sniper",        f"{GITHUB_BASE}/usopp/level1ussop.jpg"),
+            (15, "Baroque Works Era",       f"{GITHUB_BASE}/usopp/level2ussop.jpg"),
+            (30, "Enies Lobby Sogeking",    f"{GITHUB_BASE}/usopp/level3ussop.jpg"),
+            (45, "Post-Timeskip Sniper",    f"{GITHUB_BASE}/usopp/level4ussop.jpg"),
+            (60, "Pop Green Master",        f"{GITHUB_BASE}/usopp/level5ussop.jpg"),
+        ]),
+    },
+    {
+        "name": "Tony Tony Chopper",
+        "rarity": "Common",
+        "stat_mult": {"attack": 0.95, "defense": 1.0, "speed": 1.0, "hp": 1.05},
+        "moves": [
+            {"name": "Hoof Jab",           "power": 40,  "accuracy": 100, "unlock": 1},
+            {"name": "Guard Point Charge", "power": 55,  "accuracy": 90,  "unlock": 10},
+            {"name": "Heavy Point Guard",  "power": 0,   "accuracy": 100, "unlock": 15, "guard": True},
+            {"name": "Monster Point Rush", "power": 110, "accuracy": 70,  "unlock": 45},
+        ],
+        "stages": make_stages([
+            (1,  "Ship's Doctor",           f"{GITHUB_BASE}/chopper/level1choppa.jpg"),
+            (15, "Baroque Works Era",       f"{GITHUB_BASE}/chopper/level2choppa.jpg"),
+            (30, "Enies Lobby Rumble Ball", f"{GITHUB_BASE}/chopper/level3choppa.jpg"),
+            (45, "Post-Timeskip Doctor",    f"{GITHUB_BASE}/chopper/level4choppa.jpg"),
+            (60, "Monster Point",           f"{GITHUB_BASE}/chopper/level5choppa.jpg"),
+        ]),
+    },
+]
+
+RARITY_WEIGHTS = {"Common": 60, "Rare": 32, "Legendary": 8}
+
+def roll_character() -> dict:
+    weights = [RARITY_WEIGHTS[c["rarity"]] for c in CHARACTERS]
+    return random.choices(CHARACTERS, weights=weights, k=1)[0]
+
+def get_character(name: str) -> dict:
+    for c in CHARACTERS:
+        if c["name"] == name:
+            return c
+    return CHARACTERS[0]
+
+def get_character_stage(character: dict, level: int) -> dict:
+    current = character["stages"][0]
+    for stage in character["stages"]:
+        if level >= stage["min_level"]:
+            current = stage
+        else:
+            break
+    return current
+
+def get_stage_index(character: dict, level: int) -> int:
+    return character["stages"].index(get_character_stage(character, level))
+
+
+# ── Bounty profile storage ───────────────────────────────────────────────────
+
+BOUNTY_FILE = "bounty_config.json"
+BOUNTY_DATA = {}
+
+def default_bounty_profile() -> dict:
+    character = roll_character()
+    return {
+        "bounty": 500_000,
+        "level": 1,
+        "xp": 0,
+        "wins": 0,
+        "losses": 0,
+        "last_attack": 0,
+        "last_reroll": 0,
+        "last_chat_xp": 0,
+        "last_daily": 0,
+        "daily_streak": 0,
+        "character": character["name"],
+    }
+
+def save_bounty_data():
+    with open(BOUNTY_FILE, "w") as f:
+        json.dump(BOUNTY_DATA, f, indent=2)
+
+def load_bounty_data():
+    global BOUNTY_DATA
+    if os.path.exists(BOUNTY_FILE):
+        with open(BOUNTY_FILE) as f:
+            BOUNTY_DATA = json.load(f)
+        print(f"✅ Loaded bounty data for {len(BOUNTY_DATA)} user(s)")
+
+load_bounty_data()
+
+def get_bounty_profile(user_id: int):
+    """Returns the profile if this user has started playing, else None. Does NOT auto-create."""
+    return BOUNTY_DATA.get(str(user_id))
+
+def create_bounty_profile(user_id: int) -> dict:
+    """Explicitly enrolls a user."""
+    uid = str(user_id)
+    profile = default_bounty_profile()
+    BOUNTY_DATA[uid] = profile
+    save_bounty_data()
+    return profile
+
+def ensure_bounty_profile(user_id: int):
+    """Returns (profile, is_new). Creates a profile on first use if one doesn't exist yet."""
+    existing = get_bounty_profile(user_id)
+    if existing is not None:
+        return existing, False
+    return create_bounty_profile(user_id), True
+
+BOUNTY_RANKS = [
+    (0,             "🐣 Rookie"),
+    (1_000_000,     "🌊 East Blue Pirate"),
+    (10_000_000,    "⚔️ Grand Line Pirate"),
+    (50_000_000,    "🔥 Supernova"),
+    (100_000_000,   "🏴‍☠️ Warlord-Class"),
+    (500_000_000,   "👑 Yonko Commander"),
+    (1_000_000_000, "🌟 Emperor of the Sea"),
+]
+
+def get_bounty_rank(bounty: int) -> str:
+    rank = BOUNTY_RANKS[0][1]
+    for threshold, name in BOUNTY_RANKS:
+        if bounty >= threshold:
+            rank = name
+        else:
+            break
+    return rank
+
+def xp_for_level(level: int) -> int:
+    return level * 100
+
+def add_bounty_xp(profile: dict, amount: int) -> list:
+    profile["xp"] += amount
+    levels_gained = []
+    while profile["xp"] >= xp_for_level(profile["level"]):
+        profile["xp"] -= xp_for_level(profile["level"])
+        profile["level"] += 1
+        levels_gained.append(profile["level"])
+    return levels_gained
+
+def get_battle_stats(level: int, character_name: str) -> dict:
+    char = get_character(character_name)
+    stage = get_character_stage(char, level)
+    mult = char["stat_mult"]
+    boost = stage["stage_mult"]
+    base = {
+        "max_hp": 50 + level * 12,
+        "attack": 10 + level * 3,
+        "defense": 8 + level * 2,
+        "speed": 10 + level * 2,
+    }
+    return {
+        "max_hp": int(base["max_hp"] * mult["hp"] * boost),
+        "attack": int(base["attack"] * mult["attack"] * boost),
+        "defense": int(base["defense"] * mult["defense"] * boost),
+        "speed": int(base["speed"] * mult["speed"] * boost),
+    }
+
+def available_bounty_moves(level: int, character_name: str) -> list:
+    char = get_character(character_name)
+    unlocked = [m for m in char["moves"] if m["unlock"] <= level]
+    return unlocked[-4:]
+
+BATTLE_COOLDOWN_SECONDS = 3600
+STEAL_PERCENT = 0.10
+
+CHAT_XP_COOLDOWN_SECONDS = 60  # per-user cooldown between XP-earning messages
+CHAT_XP_MIN = 5
+CHAT_XP_MAX = 15
+
+async def on_message_chat_xp(message: discord.Message):
+    """Awards small random XP for chatting, on a per-user cooldown to prevent spam farming."""
+    if message.author.bot or not message.guild:
+        return
+
+    profile = get_bounty_profile(message.author.id)
+    if profile is None:
+        return  # hasn't joined the Bounty Board — no passive XP for non-players
+
+    now = datetime.now(timezone.utc).timestamp()
+    if now - profile.get("last_chat_xp", 0) < CHAT_XP_COOLDOWN_SECONDS:
+        return
+
+    profile["last_chat_xp"] = now
+    char = get_character(profile["character"])
+    pre_level = profile["level"]
+
+    gained = random.randint(CHAT_XP_MIN, CHAT_XP_MAX)
+    levels_gained = add_bounty_xp(profile, gained)
+    save_bounty_data()
+
+    if levels_gained:
+        old_stage = get_character_stage(char, pre_level)
+        new_stage = get_character_stage(char, profile["level"])
+        if new_stage != old_stage:
+            try:
+                await message.channel.send(
+                    f"🌟 {message.author.mention}'s **{char['name']}** evolved into their "
+                    f"**{new_stage['stage_name']}** look! (Now Lv.{profile['level']})"
+                )
+            except discord.Forbidden:
+                pass
+
+
+class MoveButton(discord.ui.Button):
+    def __init__(self, move: dict):
+        style = discord.ButtonStyle.secondary if move.get("guard") else discord.ButtonStyle.danger
+        super().__init__(label=move["name"], style=style)
+        self.move = move
+
+    async def callback(self, interaction: discord.Interaction):
+        view: "BountyBattleView" = self.view
+        await view.apply_move(interaction, self.move)
+
+
+class BountyBattleView(discord.ui.View):
+    def __init__(self, challenger: discord.Member, opponent: discord.Member, profile1: dict, profile2: dict):
+        super().__init__(timeout=90)
+        self.players = {
+            challenger.id: {"user": challenger, "profile": profile1},
+            opponent.id:   {"user": opponent,   "profile": profile2},
+        }
+        stats1 = get_battle_stats(profile1["level"], profile1["character"])
+        stats2 = get_battle_stats(profile2["level"], profile2["character"])
+        self.stats = {challenger.id: stats1, opponent.id: stats2}
+        self.hp = {challenger.id: stats1["max_hp"], opponent.id: stats2["max_hp"]}
+        self.max_hp = {challenger.id: stats1["max_hp"], opponent.id: stats2["max_hp"]}
+        self.guarding = {challenger.id: False, opponent.id: False}
+        self.turn_order = [challenger.id, opponent.id] if stats1["speed"] >= stats2["speed"] else [opponent.id, challenger.id]
+        self.turn_index = 0
+        self.log = []
+        self.message = None
+        self.build_buttons()
+
+    @property
+    def current_id(self):
+        return self.turn_order[self.turn_index % 2]
+
+    @property
+    def other_id(self):
+        return self.turn_order[(self.turn_index + 1) % 2]
+
+    def build_buttons(self):
+        self.clear_items()
+        profile = self.players[self.current_id]["profile"]
+        for move in available_bounty_moves(profile["level"], profile["character"]):
+            self.add_item(MoveButton(move))
+
+    def hp_bar(self, uid: int, length: int = 10) -> str:
+        pct = max(self.hp[uid], 0) / self.max_hp[uid]
+        filled = round(pct * length)
+        return "🟩" * filled + "⬛" * (length - filled)
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(title="⚔️ Bounty Battle!", color=discord.Color.gold())
+        for uid in self.turn_order:
+            user = self.players[uid]["user"]
+            char = get_character(self.players[uid]["profile"]["character"])
+            embed.add_field(
+                name=f"{user.display_name} ({char['name']})",
+                value=f"{self.hp_bar(uid)}\n{max(self.hp[uid], 0)}/{self.max_hp[uid]} HP",
+                inline=True,
+            )
+        if self.log:
+            embed.description = "\n".join(self.log[-4:])
+        embed.set_footer(text=f"{self.players[self.current_id]['user'].display_name}'s turn — choose a move")
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.current_id:
+            await interaction.response.send_message("⏳ It's not your turn!", ephemeral=True)
+            return False
+        return True
+
+    async def apply_move(self, interaction: discord.Interaction, move: dict):
+        attacker_id, defender_id = self.current_id, self.other_id
+        attacker_name = self.players[attacker_id]["user"].display_name
+        defender_name = self.players[defender_id]["user"].display_name
+
+        if move.get("guard"):
+            self.guarding[attacker_id] = True
+            self.log.append(f"🛡️ {attacker_name} used **{move['name']}**! Damage reduced next turn.")
+        else:
+            hit = random.randint(1, 100) <= move["accuracy"]
+            if not hit:
+                self.log.append(f"💨 {attacker_name} used **{move['name']}** but missed!")
+            else:
+                atk = self.stats[attacker_id]["attack"]
+                dfn = self.stats[defender_id]["defense"]
+                variance = random.uniform(0.85, 1.0)
+                dmg = max(1, int(((move["power"] * atk / dfn) / 3) * variance))
+                if self.guarding[defender_id]:
+                    dmg //= 2
+                    self.guarding[defender_id] = False
+                self.hp[defender_id] = max(0, self.hp[defender_id] - dmg)
+                self.log.append(f"💥 {attacker_name} used **{move['name']}** — {dmg} damage to {defender_name}!")
+
+        if self.hp[defender_id] <= 0:
+            await self.end_battle(interaction, winner_id=attacker_id, loser_id=defender_id)
+            return
+
+        self.turn_index += 1
+        self.build_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def end_battle(self, interaction: discord.Interaction, winner_id: int, loser_id: int):
+        winner = self.players[winner_id]["user"]
+        loser = self.players[loser_id]["user"]
+        winner_profile = self.players[winner_id]["profile"]
+        loser_profile = self.players[loser_id]["profile"]
+
+        winner_char = get_character(winner_profile["character"])
+        pre_battle_level = winner_profile["level"]
+
+        stolen = int(loser_profile["bounty"] * STEAL_PERCENT)
+        loser_profile["bounty"] = max(0, loser_profile["bounty"] - stolen)
+        winner_profile["bounty"] += stolen
+        winner_profile["wins"] += 1
+        loser_profile["losses"] += 1
+        levels_gained = add_bounty_xp(winner_profile, 50)
+        add_bounty_xp(loser_profile, 15)
+        save_bounty_data()
+
+        self.log.append(f"🏆 **{winner.display_name} wins the battle!**")
+        self.log.append(f"💰 Stole ฿{stolen:,} from {loser.display_name}!")
+        if levels_gained:
+            self.log.append(f"⬆️ {winner.display_name} leveled up to Lv.{levels_gained[-1]}!")
+            old_stage = get_character_stage(winner_char, pre_battle_level)
+            new_stage = get_character_stage(winner_char, winner_profile["level"])
+            if new_stage != old_stage:
+                self.log.append(f"🌟 {winner.display_name}'s **{winner_char['name']}** evolved into their **{new_stage['stage_name']}** look!")
+
+        embed = self.build_embed()
+        embed.description = "\n".join(self.log[-6:])
+        embed.set_footer(text="Battle ended")
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(embed=embed, view=self)
+        self.stop()
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
+
+
+class BattleChallengeView(discord.ui.View):
+    def __init__(self, challenger: discord.Member, opponent: discord.Member):
+        super().__init__(timeout=60)
+        self.challenger = challenger
+        self.opponent = opponent
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.opponent.id:
+            await interaction.response.send_message("This challenge isn't for you!", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="⚔️ Accept", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        profile1 = get_bounty_profile(self.challenger.id)
+        profile2 = get_bounty_profile(self.opponent.id)
+        battle_view = BountyBattleView(self.challenger, self.opponent, profile1, profile2)
+        await interaction.response.edit_message(content=None, embed=battle_view.build_embed(), view=battle_view)
+        battle_view.message = await interaction.original_response()
+        self.stop()
+
+    @discord.ui.button(label="❌ Decline", style=discord.ButtonStyle.secondary)
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content=f"{self.opponent.display_name} declined the challenge.", embed=None, view=None)
+        self.stop()
+
+
+# ── Slash commands ───────────────────────────────────────────────────────────
+
+
+@bot.tree.command(name="battle", description="Challenge another pirate to a bounty battle!")
+@app_commands.describe(opponent="Who do you want to battle?")
+async def battle(interaction: discord.Interaction, opponent: discord.Member):
+    if opponent.id == interaction.user.id:
+        await interaction.response.send_message("❌ You can't battle yourself!", ephemeral=True)
+        return
+    if opponent.bot:
+        await interaction.response.send_message("❌ You can't battle a bot!", ephemeral=True)
+        return
+
+    profile = get_bounty_profile(interaction.user.id)
+    if profile is None:
+        await interaction.response.send_message(
+            "❌ You haven't joined the Bounty Board yet! Use `/mycharacter` first.", ephemeral=True
+        )
+        return
+    if get_bounty_profile(opponent.id) is None:
+        await interaction.response.send_message(
+            f"❌ {opponent.display_name} hasn't joined the Bounty Board yet — they need to use `/mycharacter` first.",
+            ephemeral=True,
+        )
+        return
+
+    now = datetime.now(timezone.utc).timestamp()
+    remaining = BATTLE_COOLDOWN_SECONDS - (now - profile.get("last_attack", 0))
+    if remaining > 0:
+        mins = int(remaining // 60) + 1
+        await interaction.response.send_message(f"⏳ You're still recovering! Try again in **{mins} minute(s)**.", ephemeral=True)
+        return
+
+    profile["last_attack"] = now
+    save_bounty_data()
+
+    view = BattleChallengeView(interaction.user, opponent)
+    await interaction.response.send_message(
+        f"⚔️ {opponent.mention}, **{interaction.user.display_name}** has challenged you to a bounty battle! Accept?",
+        view=view,
+    )
+
+@bot.tree.command(name="bounty", description="View your bounty profile, or someone else's")
+@app_commands.describe(user="Whose profile to view (leave blank for yourself)")
+async def bounty(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    profile = get_bounty_profile(target.id)
+    if profile is None:
+        if target.id == interaction.user.id:
+            await interaction.response.send_message(
+                "You haven't joined the Bounty Board yet! Use `/mycharacter` to get your first bounty.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(f"{target.display_name} hasn't joined the Bounty Board yet.", ephemeral=True)
+        return
+    stats = get_battle_stats(profile["level"], profile["character"])
+    rank = get_bounty_rank(profile["bounty"])
+    char = get_character(profile["character"])
+    stage = get_character_stage(char, profile["level"])
+
+    embed = discord.Embed(title=f"🏴‍☠️ {target.display_name}'s Bounty Poster", color=discord.Color.gold())
+    embed.set_thumbnail(url=stage["image_url"])
+    embed.add_field(name="💰 Bounty", value=f"฿{profile['bounty']:,}", inline=True)
+    embed.add_field(name="🎖️ Rank", value=rank, inline=True)
+    embed.add_field(name="📊 Level", value=f"Lv. {profile['level']}", inline=True)
+    embed.add_field(name="⚔️ Record", value=f"{profile['wins']}W - {profile['losses']}L", inline=True)
+    embed.add_field(name="🎴 Character", value=f"{char['name']} — *{stage['stage_name']}*", inline=True)
+    embed.add_field(name="❤️ Max HP", value=str(stats["max_hp"]), inline=True)
+    embed.add_field(name="🗡️ ATK / 🛡️ DEF", value=f"{stats['attack']} / {stats['defense']}", inline=True)
+    embed.add_field(name="✨ XP", value=f"{profile['xp']}/{xp_for_level(profile['level'])}", inline=False)
+    embed.set_footer(text="Fight other pirates with /battle to grow your bounty!")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="mycharacter", description="View your assigned One Piece character")
+async def mycharacter(interaction: discord.Interaction):
+    profile = get_bounty_profile(interaction.user.id)
+    is_new = profile is None
+    if is_new:
+        profile = create_bounty_profile(interaction.user.id)
+
+    char = get_character(profile["character"])
+    stage = get_character_stage(char, profile["level"])
+
+    embed = discord.Embed(title=f"🎴 {char['name']} — {stage['stage_name']}", color=discord.Color.gold())
+    if is_new:
+        embed.description = (
+            f"🏴‍☠️ You've set sail! Starting bounty: **฿{profile['bounty']:,}**\n"
+            f"To check the top pirates in the server, use `/bountyboard`."
+        )
+    embed.add_field(name="Rarity", value=char["rarity"], inline=True)
+    embed.add_field(name="Level", value=f"Lv. {profile['level']}", inline=True)
+    embed.set_image(url=stage["image_url"])
+    roadmap = "\n".join(
+        f"{'✅' if profile['level'] >= s['min_level'] else '🔒'} Lv.{s['min_level']} — {s['stage_name']}"
+        for s in char["stages"]
+    )
+    embed.add_field(name="Evolution Roadmap", value=roadmap, inline=False)
+    move_list = "\n".join(f"• {m['name']}" for m in char["moves"])
+    embed.add_field(name="Moves", value=move_list, inline=False)
+    await interaction.response.send_message(embed=embed)
+
+REROLL_COOLDOWN_SECONDS = 24 * 3600  # 24 hours
+REROLL_COST = 100_000
+
+@bot.tree.command(name="reroll", description="Reroll for a new random character (costs bounty, 7-day cooldown)")
+async def reroll(interaction: discord.Interaction):
+    profile = get_bounty_profile(interaction.user.id)
+    if profile is None:
+        await interaction.response.send_message(
+            "❌ You haven't joined the Bounty Board yet! Use `/mycharacter` first.", ephemeral=True
+        )
+        return
+    now = datetime.now(timezone.utc).timestamp()
+    remaining = REROLL_COOLDOWN_SECONDS - (now - profile.get("last_reroll", 0))
+
+    if remaining > 0:
+        hours = int(remaining // 3600)
+        minutes = int((remaining % 3600) // 60)
+        await interaction.response.send_message(
+            f"⏳ You can reroll again in **{hours}h {minutes}m**.", ephemeral=True
+        )
+        return
+
+    if profile["bounty"] < REROLL_COST:
+        await interaction.response.send_message(
+            f"❌ Rerolling costs ฿{REROLL_COST:,}, but you only have ฿{profile['bounty']:,}.", ephemeral=True
+        )
+        return
+
+    old_character = get_character(profile["character"])
+    new_character = roll_character()
+    profile["bounty"] -= REROLL_COST
+    profile["character"] = new_character["name"]
+    profile["last_reroll"] = now
+    save_bounty_data()
+
+    embed = discord.Embed(
+        title="🎲 Reroll Complete!",
+        description=(
+            f"You spent ฿{REROLL_COST:,} and rerolled from **{old_character['name']}** "
+            f"to **{new_character['name']}** ({new_character['rarity']})!"
+        ),
+        color=discord.Color.gold(),
+    )
+    stage = get_character_stage(new_character, profile["level"])
+    embed.set_thumbnail(url=stage["image_url"])
+    embed.set_footer(text="Your level, XP, and bounty stay the same — only your character changed.")
+    await interaction.response.send_message(embed=embed)
+
+DAILY_COOLDOWN_SECONDS = 24 * 3600  # 24 hours between claims
+DAILY_BASE_REWARD = 50_000
+DAILY_STREAK_INCREMENT = 20_000
+
+@bot.tree.command(name="daily", description="Claim your daily bounty reward — streak grows the longer you keep it up!")
+async def daily(interaction: discord.Interaction):
+    profile = get_bounty_profile(interaction.user.id)
+    if profile is None:
+        await interaction.response.send_message(
+            "❌ You haven't joined the Bounty Board yet! Use `/mycharacter` first.", ephemeral=True
+        )
+        return
+
+    now = datetime.now(timezone.utc).timestamp()
+    remaining = DAILY_COOLDOWN_SECONDS - (now - profile.get("last_daily", 0))
+    if remaining > 0:
+        hours = int(remaining // 3600)
+        minutes = int((remaining % 3600) // 60)
+        await interaction.response.send_message(
+            f"⏳ You've already claimed today! Come back in **{hours}h {minutes}m**.", ephemeral=True
+        )
+        return
+
+    profile["daily_streak"] = profile.get("daily_streak", 0) + 1
+    streak = profile["daily_streak"]
+    reward = DAILY_BASE_REWARD + DAILY_STREAK_INCREMENT * (streak - 1)
+    profile["bounty"] += reward
+    profile["last_daily"] = now
+    save_bounty_data()
+
+    embed = discord.Embed(
+        title="🎁 Daily Bounty Claimed!",
+        description=(
+            f"You earned **฿{reward:,}**!\n\n"
+            f"🔥 Streak: **Day {streak}**\n"
+            f"💰 New bounty: ฿{profile['bounty']:,}"
+        ),
+        color=discord.Color.gold(),
+    )
+    embed.set_footer(text="Come back in 24 hours to keep your streak going — missed days don't reset it!")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="bountyboard", description="See the top bounties in the server")
+async def bountyboard(interaction: discord.Interaction):
+    sorted_users = sorted(BOUNTY_DATA.items(), key=lambda x: x[1]["bounty"], reverse=True)[:10]
+    if not sorted_users:
+        await interaction.response.send_message("No bounties recorded yet — go battle someone with /battle!")
+        return
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (uid, profile) in enumerate(sorted_users):
+        medal = medals[i] if i < 3 else f"{i + 1}."
+        member = interaction.guild.get_member(int(uid))
+        name = member.display_name if member else f"Unknown ({uid})"
+        lines.append(f"{medal} **{name}** — ฿{profile['bounty']:,} ({get_bounty_rank(profile['bounty'])})")
+    embed = discord.Embed(title="📋 THE BOUNTY BOARD", description="\n".join(lines), color=discord.Color.gold())
+    embed.set_footer(text="Most wanted pirates in the crew")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="givebounty", description="Award bounty to a member (mod only)")
+@app_commands.describe(user="Member to award bounty to", amount="Amount of bounty to add")
+async def givebounty(interaction: discord.Interaction, user: discord.Member, amount: int):
+    if not has_mod_role(interaction):
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    profile = get_bounty_profile(user.id)
+    if profile is None:
+        profile = create_bounty_profile(user.id)
+    profile["bounty"] += amount
+    save_bounty_data()
+    await interaction.response.send_message(f"✅ Gave ฿{amount:,} to {user.mention}. New bounty: ฿{profile['bounty']:,}", ephemeral=True)
+
+
+# ============================================================================
+# /tutorial COMMAND — nested dropdown tutorial for the bounty game.
+# Paste this AFTER the bounty/character roster block (it uses CHARACTERS,
+# get_character, BOUNTY_RANKS which are defined there), and before the
+# "# ── Events" section.
+# ============================================================================
+
+TUTORIAL_STATIC_PAGES = {
+    "how_to_play": {
+        "title": "📖 How to Play",
+        "description": (
+            "**1.** Use `/mycharacter` to join — you'll be randomly assigned a One Piece "
+            "character and a starting bounty of ฿500,000, automatically, the first time you run it.\n"
+            "**1b.** Don't like your character? `/reroll` gets you a new random one for "
+            "฿100,000, once every 24 hours. Your level, XP, and bounty carry over unchanged.\n"
+            "**2.** Check your profile anytime with `/bounty` or `/mycharacter`.\n"
+            "**2b.** Claim `/daily` every 24 hours for free bounty — ฿50,000 base, "
+            "+฿20,000 for every extra day in your streak. Missing a day doesn't reset your streak.\n"
+            "**3.** Challenge others with `/battle @user` to fight for bounty.\n"
+            "**4.** Winning steals 10% of the loser's bounty and gives you more XP.\n"
+            "**5.** XP levels you up — new moves unlock at Lv.10, 15, and 45. You earn XP "
+            "from winning/losing battles, **and** a small amount just from chatting in the server "
+            "(once per minute, so spamming won't farm it faster).\n"
+            "**6.** Leveling also evolves your character's look at Lv.15, 30, 45, and 60.\n"
+            "**7.** One battle challenge per hour, win or lose.\n"
+            "**8.** Check `/bountyboard` anytime to see the top pirates in the server."
+        ),
+    },
+    "battle_basics": {
+        "title": "⚔️ Battle Basics",
+        "description": (
+            "**Turn order:** Whoever has higher Speed goes first each battle.\n\n"
+            "**Moves:** Each turn you pick from up to 4 unlocked moves. Most deal damage; "
+            "one per character is a **Guard** move that halves incoming damage on the opponent's next hit.\n\n"
+            "**Accuracy:** Every move has a hit chance — stronger moves tend to miss more often, "
+            "so it's a risk/reward choice each turn.\n\n"
+            "**Winning:** First to reduce the opponent's HP to 0 wins. You'll steal 10% of their "
+            "bounty and gain 50 XP (the loser still gets 15 XP just for fighting).\n\n"
+            "**Cooldown:** After you challenge someone, you can't challenge again for 1 hour — "
+            "win or lose."
+        ),
+    },
+}
+
+def build_ranks_tutorial_embed() -> discord.Embed:
+    lines = [f"**{name}** — starts at ฿{threshold:,}" for threshold, name in BOUNTY_RANKS]
+    embed = discord.Embed(title="🎖️ Ranks & Bounty", description="\n".join(lines), color=discord.Color.gold())
+    embed.set_footer(text="Your rank updates automatically based on your current bounty.")
+    return embed
+
+def describe_stat(value: float) -> str:
+    if value >= 1.2:
+        return "🔥 High"
+    if value >= 1.05:
+        return "⬆️ Above Average"
+    if value >= 0.95:
+        return "➖ Average"
+    return "⬇️ Low"
+
+def build_character_tutorial_embed(character: dict) -> discord.Embed:
+    mult = character["stat_mult"]
+    embed = discord.Embed(title=f"🎴 {character['name']} — {character['rarity']}", color=discord.Color.gold())
+    embed.set_thumbnail(url=character["stages"][0]["image_url"])
+    embed.add_field(
+        name="Stat Profile",
+        value=(
+            f"🗡️ Attack: {describe_stat(mult['attack'])}\n"
+            f"🛡️ Defense: {describe_stat(mult['defense'])}\n"
+            f"⚡ Speed: {describe_stat(mult['speed'])}\n"
+            f"❤️ HP: {describe_stat(mult['hp'])}"
+        ),
+        inline=True,
+    )
+    move_lines = []
+    for m in character["moves"]:
+        if m.get("guard"):
+            move_lines.append(f"🛡️ **{m['name']}** — unlocks Lv.{m['unlock']} (halves next hit)")
+        else:
+            move_lines.append(f"⚔️ **{m['name']}** — unlocks Lv.{m['unlock']} (Power {m['power']}, Accuracy {m['accuracy']}%)")
+    embed.add_field(name="Moveset", value="\n".join(move_lines), inline=False)
+    stage_lines = [f"Lv.{s['min_level']} — {s['stage_name']}" for s in character["stages"]]
+    embed.add_field(name="Evolution Stages", value="\n".join(stage_lines), inline=False)
+    embed.set_footer(text="Use /mycharacter to see YOUR progress if you have this character.")
+    return embed
+
+
+class CharacterTutorialSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label=c["name"], description=c["rarity"], value=c["name"])
+            for c in CHARACTERS
+        ]
+        super().__init__(placeholder="🎴 Pick a character to see their moves...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        character = get_character(self.values[0])
+        embed = build_character_tutorial_embed(character)
+        await interaction.response.edit_message(embed=embed, view=self.view)
+
+
+class TutorialCategorySelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="📖 How to Play", value="how_to_play"),
+            discord.SelectOption(label="⚔️ Battle Basics", value="battle_basics"),
+            discord.SelectOption(label="🎖️ Ranks & Bounty", value="ranks_bounty"),
+            discord.SelectOption(label="🎴 Characters & Movesets", value="characters"),
+        ]
+        super().__init__(placeholder="📚 Choose a topic...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        view: "TutorialView" = self.view
+        await view.show_category(interaction, self.values[0])
+
+
+class TutorialView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.category_select = TutorialCategorySelect()
+        self.add_item(self.category_select)
+
+    async def show_category(self, interaction: discord.Interaction, category: str):
+        self.clear_items()
+        self.add_item(self.category_select)
+
+        if category == "characters":
+            self.add_item(CharacterTutorialSelect())
+            embed = discord.Embed(
+                title="🎴 Characters & Movesets",
+                description="Pick a character below to see their full stat profile, moves, and evolution roadmap.",
+                color=discord.Color.gold(),
+            )
+        elif category == "ranks_bounty":
+            embed = build_ranks_tutorial_embed()
+        else:
+            page = TUTORIAL_STATIC_PAGES[category]
+            embed = discord.Embed(title=page["title"], description=page["description"], color=discord.Color.gold())
+
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+@bot.tree.command(name="tutorial", description="Learn how to play the Bounty Board game")
+async def tutorial(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="📖 Bounty Board Tutorial",
+        description=(
+            "New to the bounty game? Pick a topic below to learn the ropes:\n\n"
+            "📖 **How to Play** — the full game loop\n"
+            "⚔️ **Battle Basics** — how fights actually work\n"
+            "🎖️ **Ranks & Bounty** — what your bounty amount means\n"
+            "🎴 **Characters & Movesets** — every character's stats and moves"
+        ),
+        color=discord.Color.gold(),
+    )
+    view = TutorialView()
+    await interaction.response.send_message(embed=embed, view=view)
+
 
 # ── Events ─────────────────────────────────────────────────────────────────────
 
@@ -527,6 +1429,9 @@ async def on_message(message):
     # ── AFK check ────────────────────────────────────────────────────────────
     await on_message_afk(message)
 
+    # ── Bounty chat XP ─────────────────────────────────────────────────────
+    await on_message_chat_xp(message)
+
     # ── Nakama GIF trigger ────────────────────────────────────────────────────
     await on_message_nakama(message)
 
@@ -547,18 +1452,20 @@ async def on_message(message):
         return
 
     # ── Spam detection ────────────────────────────────────────────────────────
-    uid = message.author.id
-    now = asyncio.get_event_loop().time()
-    if uid not in spam_tracker:
-        spam_tracker[uid] = []
-    spam_tracker[uid] = [t for t in spam_tracker[uid] if now - t < 5]
-    spam_tracker[uid].append(now)
-    if len(spam_tracker[uid]) >= 5:
-        await message.delete()
-        await message.channel.send(f"{message.author.mention} Slow down, stop spamming! ⚠️", delete_after=5)
-        await log_action(message.guild, "Auto-Mod: Spam", bot.user, message.author)
-        spam_tracker[uid] = []
-        return
+    SPAM_EXEMPT_CHANNEL_ID = 1502196110540673054  # #spamming-channel — spam is allowed here
+    if message.channel.id != SPAM_EXEMPT_CHANNEL_ID:
+        uid = message.author.id
+        now = asyncio.get_event_loop().time()
+        if uid not in spam_tracker:
+            spam_tracker[uid] = []
+        spam_tracker[uid] = [t for t in spam_tracker[uid] if now - t < 5]
+        spam_tracker[uid].append(now)
+        if len(spam_tracker[uid]) >= 5:
+            await message.delete()
+            await message.channel.send(f"{message.author.mention} Slow down, stop spamming! ⚠️", delete_after=5)
+            await log_action(message.guild, "Auto-Mod: Spam", bot.user, message.author)
+            spam_tracker[uid] = []
+            return
 
     await bot.process_commands(message)
 
